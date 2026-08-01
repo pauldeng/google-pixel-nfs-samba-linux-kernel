@@ -157,6 +157,18 @@ check_fastboot_state() {
     exit 1
   }
 }
+bootloader_rejects_ram_boot() {
+  # Recognised refusals to boot an image from RAM that the same bootloader
+  # boots from flash. Pixel 1 answers "dtb not found" because its device trees
+  # are appended to the kernel and only the flash path scans them; measured on
+  # Fastboot 28.0.2, 29.0.5, 31.0.3 and 37.0.1.
+  case "${1,,}" in
+    *"dtb not found"*) return 0 ;;
+    *"unknown command"*) return 0 ;;
+    *"not supported in locked device"*) return 1 ;;
+    *) return 1 ;;
+  esac
+}
 check_partition_size() {
   local image=$1 raw size image_size
   raw=$(fastboot_value "partition-size:boot_$slot")
@@ -248,9 +260,38 @@ case "$action" in
       exit 1
     }
     (cd "$state_dir" && sha256sum -c packaged-images.sha256)
+    custom_sha=$(sha256sum "$state_dir/custom-boot.img" | awk '{print $1}')
+    # Any previous verdict is stale the moment we retest.
+    rm -f "$state_dir/test-success.env" "$state_dir/test-unsupported.env"
     adb -s "$serial" reboot bootloader
     check_fastboot_state
-    fastboot -s "$serial" boot "$state_dir/noop-boot.img"
+    # The no-op image is byte-identical in components to the boot partition the
+    # bootloader already boots from flash. If it is rejected from RAM, that is
+    # proof of a bootloader limitation rather than a defect in our image, and it
+    # is the only condition under which an untested flash may later be
+    # authorised. Any other failure leaves no evidence behind on purpose.
+    noop_status=0
+    noop_output=$(fastboot -s "$serial" boot "$state_dir/noop-boot.img" 2>&1) || noop_status=$?
+    printf '%s\n' "$noop_output"
+    if ((noop_status != 0)); then
+      if bootloader_rejects_ram_boot "$noop_output"; then
+        printf 'reason=%q\nfastboot_output=%q\ncustom_boot_sha=%q\nnoop_boot_sha=%q\nrecorded_utc=%q\n' \
+          'bootloader rejected a RAM-booted image that it boots from flash' \
+          "$noop_output" "$custom_sha" \
+          "$(sha256sum "$state_dir/noop-boot.img" | awk '{print $1}')" \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          >"$state_dir/test-unsupported.env"
+        echo "ERROR: this bootloader cannot RAM-boot an image it boots from flash." >&2
+        echo "The reversible acceptance test is impossible here. Evidence recorded in" >&2
+        echo "  $state_dir/test-unsupported.env" >&2
+        echo "Return the phone to Android, then see the untested-flash procedure." >&2
+        exit 1
+      fi
+      echo "ERROR: 'fastboot boot' failed for a reason other than a known bootloader" >&2
+      echo "limitation. This is not grounds for an untested flash. Investigate:" >&2
+      printf '%s\n' "$noop_output" >&2
+      exit 1
+    fi
     wait_adb
     [[ $(root_cmd id) == *'uid=0(root)'* ]] || {
       echo "ERROR: root failed after no-op repack" >&2
@@ -312,10 +353,28 @@ case "$action" in
       # acceptance test cannot run at all there. Every other gate still
       # applies; only the temporary-boot evidence is waived, and only when
       # the operator supplies a second image-bound token.
+      # An untested flash is permitted only when `test` proved the bootloader
+      # cannot RAM-boot at all. A custom image that boots but fails the kernel
+      # identity or NFS/CIFS checks leaves no evidence, so it cannot reach here.
+      [[ -f $state_dir/test-unsupported.env ]] || {
+        echo "ERROR: temporary-test evidence is absent and no bootloader-limitation" >&2
+        echo "evidence was recorded. Run 'test' first." >&2
+        echo "An untested flash requires 'test' to have proven that this bootloader" >&2
+        echo "rejects a RAM-booted image it boots from flash. A custom image that" >&2
+        echo "boots but fails validation is never eligible." >&2
+        exit 1
+      }
+      custom_boot_sha=""
+      # shellcheck source=/dev/null
+      . "$state_dir/test-unsupported.env"
+      [[ $custom_boot_sha == "$current_sha" ]] || {
+        echo "ERROR: the recorded bootloader-limitation evidence refers to a different" >&2
+        echo "image than the one about to be flashed. Rerun 'test'." >&2
+        exit 1
+      }
       expected_untested="UNTESTED:$device:$slot:${current_sha:0:12}"
       [[ $confirm_untested == "$expected_untested" ]] || {
-        echo "ERROR: temporary-test evidence is absent." >&2
-        echo "Run 'test' first. If this bootloader rejects 'fastboot boot', rerun with:" >&2
+        echo "ERROR: this bootloader cannot run the reversible test. To flash anyway:" >&2
         echo "  --confirm-untested '$expected_untested'" >&2
         echo "Recovery then depends solely on the rollback image; confirm it is verified and its command is recorded off-host." >&2
         exit 1
@@ -338,9 +397,7 @@ case "$action" in
         echo "ERROR: live boot_$slot no longer matches the rollback image; refusing an untested flash" >&2
         exit 1
       }
-      printf 'untested_flash_utc=%q\nuntested_flash_sha=%q\nrollback_sha=%q\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$current_sha" "$original_sha" \
-        >"$state_dir/untested-flash.env"
+      untested_flash=1
       echo "WARNING: flashing without temporary-boot evidence; rollback image verified against live boot_$slot"
     fi
     expected="FLASH:$device:$slot:${current_sha:0:12}"
@@ -348,17 +405,34 @@ case "$action" in
       echo "ERROR: exact flash token required: $expected" >&2
       exit 1
     }
+    # Recorded only once every gate has passed, so the file never claims an
+    # untested flash that was refused.
+    if ((${untested_flash:-0})); then
+      printf 'untested_flash_utc=%q\nuntested_flash_sha=%q\nrollback_sha=%q\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$current_sha" "$original_sha" \
+        >"$state_dir/untested-flash.env"
+    fi
     # From here the boot partition may change, so keep the exact recovery
     # command on screen for any non-zero exit, including a failed boot.
     rollback_sha=$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')
-    rollback_command=$(printf '%q rollback --workspace %q --device %q --slot %q --serial %q --confirm-rollback %q' \
-      "$0" "$workspace" "$device" "$slot" "$serial" "ROLLBACK:$device:$slot:${rollback_sha:0:12}")
-    # shellcheck disable=SC2064 # Expand the command now, not at trap time.
-    trap "flash_status=\$?; ((flash_status == 0)) || {
+    rollback_token="ROLLBACK:$device:$slot:${rollback_sha:0:12}"
+    # The trap runs a function rather than a string built from data. Embedding
+    # an expanded path in trap text breaks the trap outright when the workspace
+    # contains an apostrophe, which would suppress recovery instructions at the
+    # exact moment they are needed.
+    # shellcheck disable=SC2329 # Invoked by trap.
+    print_recovery() {
       echo >&2
-      echo 'RECOVERY: enter Fastboot with the hardware key combination, then run:' >&2
-      echo '  $rollback_command' >&2
-    }" EXIT
+      echo "RECOVERY: enter Fastboot with the hardware key combination, then run:" >&2
+      printf '  %q rollback --workspace %q --device %q --slot %q --serial %q --confirm-rollback %q\n' \
+        "$0" "$workspace" "$device" "$slot" "$serial" "$rollback_token" >&2
+    }
+    # shellcheck disable=SC2329 # Invoked by trap.
+    on_flash_exit() {
+      local flash_status=$?
+      ((flash_status == 0)) || print_recovery
+    }
+    trap on_flash_exit EXIT
     adb -s "$serial" reboot bootloader
     check_fastboot_state
     check_partition_size "$state_dir/custom-boot.img"

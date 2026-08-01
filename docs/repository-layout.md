@@ -1,8 +1,18 @@
 # Repository layout
 
 ```text
-AI_AGENT_RUNBOOK.md
-Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md
+AGENTS.md                  single source of truth for AI agents
+CLAUDE.md                  imports AGENTS.md
+docs/
+  ai-agent-runbook.md
+  action-plan.md
+  safety-model.md
+  quick-start.md
+  validation-status.md
+  device-identification.md
+  repository-layout.md
+  development.md
+  references.md
 Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/
   source-lock.env
   host-shell-lib.sh

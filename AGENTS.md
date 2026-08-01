@@ -14,6 +14,8 @@ This flashes a boot partition on real hardware. Mistakes cost the user a device,
 2. [`docs/action-plan.md`](docs/action-plan.md) — policy, reasoning, acceptance gates.
 3. [`docs/validation-status.md`](docs/validation-status.md) — what is proven versus assumed.
 
+**Precedence when documents disagree:** the deployment policy in `docs/action-plan.md` is normative for anything touching temporary boot, flashing or rollback. The runbook gives the procedure, never a different rule. If you find a contradiction, treat it as a bug, follow the action plan, and say so.
+
 ## Commands
 
 ```bash

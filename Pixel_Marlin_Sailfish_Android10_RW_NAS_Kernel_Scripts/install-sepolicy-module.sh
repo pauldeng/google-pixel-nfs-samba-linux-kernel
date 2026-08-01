@@ -19,6 +19,8 @@ set -euo pipefail
 # disabling CONFIG_ANDROID_PARANOID_NETWORK would do.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=source-lock.env
+. "$SCRIPT_DIR/source-lock.env"
 # shellcheck source=host-shell-lib.sh
 . "$SCRIPT_DIR/host-shell-lib.sh"
 
@@ -46,6 +48,38 @@ root_cmd id | grep -q 'uid=0(root)' || {
   echo "ERROR: /data/adb/modules is absent; this needs a Magisk installation" >&2
   exit 1
 }
+
+# Persistently relaxing SELinux policy must not be possible on an unrelated
+# phone. Apply the same device and build gates as deployment, and additionally
+# require this project's kernel: the rule exists only because CIFS was built
+# into it, so a stock kernel has no business receiving it.
+device=$(adb -s "$serial" shell getprop ro.product.device | tr -d '\r')
+build=$(adb -s "$serial" shell getprop ro.build.id | tr -d '\r')
+version=$(adb -s "$serial" shell getprop ro.build.version.release | tr -d '\r')
+release=$(adb -s "$serial" shell uname -r | tr -d '\r')
+[[ $device == marlin || $device == sailfish ]] || {
+  echo "ERROR: unsupported device: $device" >&2
+  exit 1
+}
+[[ $build == "$ANDROID_BUILD" && $version == "$ANDROID_VERSION" ]] || {
+  echo "ERROR: Android build/version mismatch: $build / $version" >&2
+  exit 1
+}
+[[ $release == *"$KERNEL_LOCALVERSION"* ]] || {
+  echo "ERROR: this phone is not running the project kernel: $release" >&2
+  echo "The rule is only meaningful with the custom CIFS/NFS kernel installed." >&2
+  exit 1
+}
+printf 'Target: %s / %s / %s\n' "$device" "$build" "$release"
+
+# Report whether the denial this rule addresses has actually been observed.
+# Not a gate: installing before the first network interruption is legitimate.
+denials=$(root_cmd 'dmesg | grep -c "denied { net_raw }"' | tr -d '\r')
+if [[ $denials =~ ^[0-9]+$ ]] && ((denials > 0)); then
+  printf 'Observed net_raw denials in the current boot: %s\n' "$denials"
+else
+  echo "No net_raw denials observed yet; installing pre-emptively is expected."
+fi
 
 install_script=$(
   cat <<EOF
@@ -80,6 +114,23 @@ installed_rule=$(root_cmd "cat $MODULE_DIR/sepolicy.rule" | tr -d '\r')
 }
 
 echo
-echo "Magisk applies sepolicy.rule during early boot. Reboot, then confirm with:"
-echo "  adb shell \"su -c 'dmesg | grep -c \\\"denied { net_raw }\\\"'\"   # expect no growth"
+# On a file-based-encrypted device Magisk cannot read module rules at pre-init,
+# because /data is not decrypted yet. It collects them during boot and stages
+# them to an unencrypted location that pre-init can read on the following boot.
+# Saying "reboot" here would recreate the exact trap the documentation exists to
+# prevent: the first reboot still shows denials and the module looks broken.
+crypto=$(adb -s "$serial" shell getprop ro.crypto.type | tr -d '\r')
+if [[ $crypto == file || $crypto == block ]]; then
+  echo "/data is encrypted (ro.crypto.type=$crypto)."
+  echo "Magisk stages module rules for the NEXT boot, so REBOOT TWICE before judging."
+  echo "After one reboot the denials are still expected; that is not a failure."
+else
+  echo "Reboot once, then confirm."
+fi
+echo
+echo "Confirm with both counts at zero, ideally across a deliberate Wi-Fi teardown:"
+echo "  adb shell \"su -c 'dmesg | grep -c \\\"denied { net_raw }\\\"'\""
 echo "  adb shell \"su -c 'dmesg | grep -c \\\"Error -13 creating socket\\\"'\""
+echo
+echo "To apply immediately without rebooting (cleared by any reboot):"
+echo "  adb shell \"su -c '/data/adb/magisk/magiskpolicy --live \\\"$RULE\\\"'\""

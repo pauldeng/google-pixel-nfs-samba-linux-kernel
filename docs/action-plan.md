@@ -16,7 +16,7 @@ Idempotent Ubuntu 20.04 build, safe boot-image deployment and rollback, read-onl
 
 > **Validation status**
 >
-> The Android build mapping, kernel branch, exact commit and tree, toolchain revisions, Kconfig selections, legacy-SAR Magisk requirement, NFS `addr=` requirement, CIFS dialect ceiling, Android storage-view model, and shell-command quoting risks were checked against the locked source and primary documentation. On 2026-08-01, the separated `build-kernel.sh` was executed end to end against the three local locked repositories; it produced and checksum-verified `Image`, `Image.lz4-dtb`, the resolved/minimised configurations, source lock, and build manifest. Both isolated local import and network-only fresh shallow-clone source-preparation paths were exercised. All companion shell scripts were formatted with pinned `shfmt` v3.13.1, checked with pinned ShellCheck v0.11.0, and reviewed for target validation, source/type/mode checks, explicit flash/rollback tokens, one-slot writes, bounded probe deletion, and secret-file permissions. Repository Markdown was formatted and linted with pinned `rumdl` v0.2.47. The device scripts have not been executed on a phone, NAS, bootloader, MagiskBoot, Fastboot, or Google Photos; every physical checkpoint remains mandatory.
+> The Android build mapping, kernel branch, exact commit and tree, toolchain revisions, Kconfig selections, legacy-SAR Magisk requirement, NFS `addr=` requirement, CIFS dialect ceiling, Android storage-view model, and shell-command quoting risks were checked against the locked source and primary documentation. On 2026-08-01, the separated `build-kernel.sh` was executed end to end against the three local locked repositories; it produced and checksum-verified `Image`, `Image.lz4-dtb`, the resolved/minimised configurations, source lock, and build manifest. Both isolated local import and network-only fresh shallow-clone source-preparation paths were exercised. All companion shell scripts were formatted with pinned `shfmt` v3.13.1, checked with pinned ShellCheck v0.11.0, and reviewed for target validation, source/type/mode checks, explicit flash/rollback tokens, one-slot writes, bounded probe deletion, and secret-file permissions. Repository Markdown was formatted and linted with pinned `rumdl` v0.2.47. On 2026-08-02 the device scripts were executed against a Pixel (sailfish): kernel flashed, NAS mounted read-only over SMB 3.0, mount surviving reboot and network loss, one photo uploaded to Google Photos at original quality. Rollback, NFSv3 against a real export, the direct shared-storage mount and NAS-off boot remain unexercised.
 
 Prepared for a first-generation Google Pixel family device with an unlocked bootloader. The phone described in the request - Pixel XL 128 GB - is marlin. The same plan also supports sailfish through device auto-detection and separate device/slot-specific boot packaging.
 
@@ -202,7 +202,8 @@ Google groups the first-generation Pixel family under the marlin kernel source l
 | Unexpected Git origin/ref/commit/tree                    | Stop. Inspect the source; never force the lock to match an unknown tree.                  |
 | Dirty script-managed worktree                            | Stop and preserve it. Inspect the changes, then use a different workspace; the script never resets it. |
 | Boot backup checksum failure                             | Stop. Preserve the files and investigate; never overwrite automatically.                  |
-| fastboot boot failure or boot loop                       | Return to Fastboot; do not perform permanent flash.                                       |
+| Custom image fails temporary boot, or boot-loops         | Return to Fastboot; do not perform permanent flash. Branch A of the deployment policy.    |
+| `fastboot boot` refused for every image, no-op included  | Bootloader limitation. `test` records evidence; see the deployment policy and 8.3.1.      |
 | Custom kernel lacks NFS/CIFS runtime evidence            | Stop and rebuild; do not continue to NAS tests.                                           |
 | Writable target is the only archive copy or uses admin login | Stop. Create a dedicated least-privilege staging share/account.                         |
 | NAS recovery has not been tested                           | Stop before real files. Establish snapshot/recycle-bin/versioned or independent recovery. |
@@ -596,6 +597,24 @@ First copy irreplaceable user data off the phone. Then use the exact token print
 ```
 
 The example token is intentionally fake. Use only the exact token emitted by your script. Immediately before flash, the script confirms the Fastboot product, serial, current slot, unlocked state, test evidence, image checksum, and boot-partition size. It writes only boot_a or boot_b for the tested current slot and leaves the other slot untouched.
+
+## Deployment policy: two branches, one rule
+
+This is the single normative statement. Any other document that mentions temporary boot defers to it.
+
+**Branch A — normal.** `fastboot boot` works. The reversible temporary test is mandatory. `test` boots the no-op image, then the custom image, and requires Magisk root after each plus `-nas1` and NFS/CIFS registration. Only then does it write `test-success.env`, and only that file authorises `flash`. **Any failure of the custom image on this branch forbids a permanent flash.** A boot loop, lost root, a missing kernel identity or an unregistered filesystem all mean stop and investigate.
+
+**Branch B — bootloader cannot RAM-boot at all.** Some bootloaders refuse `fastboot boot` for every image, including one whose components are byte-identical to the boot partition they already boot from flash. Pixel 1 answers `dtb not found`; see 8.3.1. On these devices the reversible test cannot exist, so requiring it would simply block the project.
+
+Branch B is entered only on proof, never on assertion:
+
+1. `test` boots the **no-op** image first. It is the control: identical components to the live partition, so a refusal cannot be blamed on the custom image.
+2. If and only if that refusal matches a recognised bootloader limitation, `test` records `test-unsupported.env`, bound to the custom image's SHA-256.
+3. `flash` accepts `--confirm-untested` only when that file exists and its recorded hash matches the image about to be written.
+
+A custom image that **does** boot but fails validation produces no evidence and can never reach branch B. Any other `fastboot boot` failure — a boot loop, a transport error, an invalid image — also produces no evidence.
+
+On branch B the flash additionally re-verifies the rollback image against its recorded checksum and against the live partition before writing, and prints the recovery command on any failure. Recovery then rests entirely on that rollback image.
 
 ### 8.3.1 Bootloaders that reject `fastboot boot`
 

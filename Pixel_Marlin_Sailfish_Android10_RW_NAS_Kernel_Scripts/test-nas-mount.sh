@@ -55,8 +55,13 @@ fetch_remote_log() {
   # `adb pull` runs as the shell user and fails with "Permission denied", which
   # previously discarded the evidence for a failed mount and made a successful
   # mount look like a failure. Read it back through su instead.
-  local contents
-  contents=$(root_cmd "cat /data/local/tmp/pixel-nas-mount-test.log 2>/dev/null" | tr -d '\r')
+  # Callers invoke this from an `if`, which suppresses errexit, so the read
+  # status has to be captured explicitly. Without it a truncated or failed
+  # privileged cat would be written out as though it were the whole log.
+  local contents status=0
+  contents=$(root_cmd "cat /data/local/tmp/pixel-nas-mount-test.log") || status=$?
+  ((status == 0)) || return 1
+  contents=${contents//$'\r'/}
   [[ -n $contents ]] || return 1
   (
     umask 077

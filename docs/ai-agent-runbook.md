@@ -35,7 +35,7 @@ Symptoms an agent will actually see, and what they mean.
 | Build failed but the log shows no `error:` | The command piped output through `tail`, discarding the failure | Never pipe a build through `tail`. Capture the whole log. |
 | `kernel_release=3.18.137-nas1+` | `setlocalversion` adds `+` in a detached worktree | Expected. Match on the `-nas1` substring, not equality. |
 | `grep want_initramfs <boot partition>` returns 0 | The kernel inside boot.img is LZ4-compressed | Must `magiskboot unpack` first, then grep the extracted `kernel` |
-| `fastboot boot` → `FAILED (remote: 'dtb not found')` | This bootloader cannot RAM-boot an appended-DTB image. Reproduced on fastboot 28.0.2, 29.0.5, 31.0.3, 37.0.1, and with an image byte-identical to the working `boot_b`. | Unfixable. Skip the temporary test; flash with `--confirm-untested` (§7) |
+| `fastboot boot` → `FAILED (remote: 'dtb not found')` | This bootloader cannot RAM-boot an appended-DTB image. Reproduced on fastboot 28.0.2, 29.0.5, 31.0.3, 37.0.1, and with an image byte-identical to the working `boot_b`. | Unfixable. Still run `test`: it records the evidence that unlocks `--confirm-untested` (§7) |
 | `ERROR: invalid Fastboot boot partition size: <tab>0x2000000` | Fixed in `49da559`; fastboot pads with a tab | Update the repo if you see this |
 | Boot shows "There's an internal problem with your device" | AOSP's `compatibility_matrix.2.xml` requires `CONFIG_NFS_FS=n`; enabling NFS fails VINTF | Cosmetic, once per boot. Dismiss. Do **not** disable NFS. See plan 4.1.1 |
 | `test-nas-mount.sh` reports failure but the mount is actually up | Fixed in `0e269aa`; it used `adb pull` on a root-owned `0600` log | Update the repo if you see this |
@@ -128,7 +128,11 @@ It prints a **rollback token and command — have the user record them off the m
 
 ## 7. Phase 5 — flash
 
-`fastboot boot` does not work on this bootloader, so the reversible test is impossible. `test` will fail; that is expected and is not a defect in the image.
+**Run `test` first. Always.** Do not skip to an untested flash.
+
+On this hardware `fastboot boot` is refused for every image, so `test` fails and records `test-unsupported.env` as proof of a bootloader limitation. Only that file unlocks `--confirm-untested`.
+
+This distinction matters: a custom image that **boots but fails validation** (no `-nas1`, no NFS/CIFS, lost root) produces no evidence and must never be flashed. `test` enforces that; do not attempt to work around it. Branch B of the deployment policy in [action-plan.md](action-plan.md) is the normative statement.
 
 Phone must be **in Android**, not the bootloader. Tell the user: *do not press anything, the script reboots the phone itself.*
 

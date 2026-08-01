@@ -80,7 +80,9 @@ Then temporarily boot the no-op image followed by the custom image:
   --device auto
 ```
 
-Stop if either temporary boot fails, Magisk root disappears, `uname -r` lacks `-nas1`, or NFS/CIFS is absent from `/proc/filesystems`.
+Stop if the custom image fails to boot, Magisk root disappears, `uname -r` lacks `-nas1`, or NFS/CIFS is absent from `/proc/filesystems`.
+
+One exception: if `fastboot boot` is refused for *every* image including the no-op control, that is a bootloader limitation rather than an image defect. `test` records evidence and the deployment policy in [action-plan.md](action-plan.md) describes the evidence-gated untested-flash route.
 
 Permanent flash and rollback are intentionally not abbreviated here. Follow Sections 8 and 11 of the action plan and use only the exact device/slot/hash-bound commands and tokens printed by `device-deploy.sh`.
 
