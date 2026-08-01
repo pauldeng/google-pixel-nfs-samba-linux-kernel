@@ -8,6 +8,8 @@ Builds a custom Linux 3.18 kernel with built-in NFSv3 and CIFS/SMB2 clients for 
 
 This flashes a boot partition on real hardware. Mistakes cost the user a device, not a test run.
 
+**Prerequisite:** the phone must already be OEM-unlocked, rooted, and running a Magisk-patched boot image. Verify it rather than assuming. If the user has not done this, help them through it — see Phase 0 of the runbook — and be explicit that unlocking the bootloader erases the phone.
+
 ## Start here
 
 1. [`docs/ai-agent-runbook.md`](docs/ai-agent-runbook.md) — execution order, exact commands, and every trap already hit on hardware. **Read before running anything.**

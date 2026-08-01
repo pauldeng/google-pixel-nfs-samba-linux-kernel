@@ -29,7 +29,7 @@ Symptoms an agent will actually see, and what they mean.
 
 | Symptom | Cause | Action |
 |---|---|---|
-| `sudo: a terminal is required to read the password` | No TTY in the harness or behind `!` | Install Google platform-tools to `~/.local/bin` without sudo (§3). Only udev rules need sudo. |
+| `sudo: a terminal is required to read the password` | No TTY in the harness or behind `!` | Install Google platform-tools to `~/.local/bin` without sudo (§4). Only udev rules need sudo. |
 | Build exits ~0 but produced nothing | Backgrounded with `nohup`/`setsid`, then reaped | Use the harness's own background mode |
 | `file not recognized: File truncated`, `fixdep: error opening depfile`, duplicate `CC` lines | Two builds raced, or a killed build left truncated objects | Rerun incrementally; if it repeats, `--clean-build` |
 | Build failed but the log shows no `error:` | The command piped output through `tail`, discarding the failure | Never pipe a build through `tail`. Capture the whole log. |
@@ -39,11 +39,48 @@ Symptoms an agent will actually see, and what they mean.
 | `ERROR: invalid Fastboot boot partition size: <tab>0x2000000` | Fixed in `49da559`; fastboot pads with a tab | Update the repo if you see this |
 | Boot shows "There's an internal problem with your device" | AOSP's `compatibility_matrix.2.xml` requires `CONFIG_NFS_FS=n`; enabling NFS fails VINTF | Cosmetic, once per boot. Dismiss. Do **not** disable NFS. See plan 4.1.1 |
 | `test-nas-mount.sh` reports failure but the mount is actually up | Fixed in `0e269aa`; it used `adb pull` on a root-owned `0600` log | Update the repo if you see this |
-| Mount reads `Host is down`, `/proc/mounts` still lists it, `CIFS VFS: Error -13 creating socket` every 3 s | `cifsd` denied `net_raw`, cannot rebuild its socket after the session drops | **Blocking for unattended use.** Install the sepolicy module (§9) |
+| Mount reads `Host is down`, `/proc/mounts` still lists it, `CIFS VFS: Error -13 creating socket` every 3 s | `cifsd` denied `net_raw`, cannot rebuild its socket after the session drops | **Blocking for unattended use.** Install the sepolicy module (§10) |
 | sepolicy module installed but denials continue after one reboot | `/data` is FBE; Magisk stages module rules for the *next* boot | Reboot a second time before judging. See plan 9.8 |
 | Google Photos never lists the `NAS-Inbox` device folder | Photos 7.85 does not surface it even with correct MediaStore bucket metadata | Enable **Back up all device folders**. Uploads work regardless. |
 
-## 3. Phase 1 — host
+## 3. Phase 0 — prerequisites the phone must already meet
+
+This project assumes the phone is **already OEM-unlocked, rooted, and running a Magisk-patched boot image**. Verify before anything else; do not assume, and do not proceed on a phone that fails these.
+
+```bash
+adb shell getprop ro.product.device        # marlin or sailfish
+adb shell getprop ro.build.id              # exactly QP1A.191005.007.A3
+adb shell su -c id                         # uid=0(root)
+adb shell su -c 'ls /data/adb/magisk/magiskboot'
+adb reboot bootloader && fastboot getvar unlocked   # unlocked: yes
+fastboot reboot
+```
+
+**If the user has not done this, help them — do not just refuse.** It is a prerequisite, not an obstacle, and it is the step most likely to stall a newcomer. Walk them through it in this order, and be explicit about the destructive part:
+
+1. **Enable Developer options.** Settings → About phone → tap **Build number** seven times.
+2. **Enable OEM unlocking and USB debugging.** Settings → System → Advanced → Developer options. If **OEM unlocking** is greyed out, the device is carrier-locked and this project cannot proceed; say so plainly.
+3. **Unlock the bootloader.** Tell the user in these words: *this erases everything on the phone.* Have them back up anything they care about first.
+
+   ```bash
+   adb reboot bootloader
+   fastboot flashing unlock
+   ```
+
+   **Tell the user to press Volume-Up to highlight "Unlock the bootloader", then Power to confirm.** The phone then factory-resets and reboots. They must walk through Android setup again and re-enable USB debugging.
+4. **Install Magisk.** Have them install the Magisk APK, obtain the factory `boot.img` matching `QP1A.191005.007.A3`, patch it in the Magisk app, pull the patched image to the host, and flash it:
+
+   ```bash
+   adb reboot bootloader
+   fastboot flash boot magisk_patched.img
+   fastboot reboot
+   ```
+
+5. **Re-verify** with the block at the top of this section. `su -c id` must return `uid=0(root)`.
+
+Only then does the `want_initramfs` gate in section 5 make sense: that string exists because Magisk hexpatched the kernel, so it is also a check that step 4 genuinely worked.
+
+## 4. Phase 1 — host
 
 ```bash
 for t in adb fastboot; do command -v $t; done
@@ -72,7 +109,7 @@ sudo apt-get install --no-install-recommends android-sdk-platform-tools-common
 
 Never suggest `sudo adb`.
 
-## 4. Phase 2 — build
+## 5. Phase 2 — build
 
 ```bash
 cd ~/pixel-nas-kernel-work/Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts
@@ -88,7 +125,7 @@ kernel_release=3.18.137-nas1+
 Image  Image.lz4-dtb  kernel.config  defconfig  source-lock.env  build-manifest.txt  SHA256SUMS
 ```
 
-## 5. Phase 3 — verify the phone
+## 6. Phase 3 — verify the phone
 
 Tell the user: plug in the phone, unlock the screen, approve the RSA prompt if it appears.
 
@@ -116,7 +153,7 @@ cd /; rm -rf \$W'"
 
 Required: `want_initramfs: 1`, `skip_initramfs: 0`. Anything else means the phone is not in the Magisk-patched state `device-package.sh` requires, and it will refuse.
 
-## 6. Phase 4 — package
+## 7. Phase 4 — package
 
 ```bash
 ./device-deploy.sh prepare --workspace "$HOME/pixel-nas-build-workspace" --device auto
@@ -126,7 +163,7 @@ Reads only. Tell the user not to press anything.
 
 It prints a **rollback token and command — have the user record them off the machine** (phone photo, paper). On this hardware the no-op repack came back byte-identical to the original boot image, which is a stronger result than the script requires.
 
-## 7. Phase 5 — flash
+## 8. Phase 5 — flash
 
 **Run `test` first. Always.** Do not skip to an untested flash.
 
@@ -147,7 +184,7 @@ Both tokens come from the scripts. The untested path re-verifies the rollback im
 
 Verify: `uname -r` contains `-nas1`, root still works, `nfs` and `cifs` in `/proc/filesystems`.
 
-## 8. Phase 6 — NAS discovery
+## 9. Phase 6 — NAS discovery
 
 Do this from the Ubuntu host before touching the phone. No credentials needed for protocol probing.
 
@@ -164,7 +201,7 @@ smbclient -L //NAS -A auth
 
 **Share enumeration is not access.** Test each share with `-c ls` and confirm denials on the ones that should be denied. Test write refusal explicitly with `put`.
 
-## 9. Phase 7 — mount, and the rule that makes it usable
+## 10. Phase 7 — mount, and the rule that makes it usable
 
 Config lives outside the integrity-covered directory:
 
@@ -200,7 +237,7 @@ adb shell "su -c 'dmesg | grep -c \"Error -13 creating socket\"'"
 
 Retire any other CIFS module: `touch /data/adb/modules/<id>/remove`, then reboot.
 
-## 10. Phase 8 — Google Photos
+## 11. Phase 8 — Google Photos
 
 ```bash
 adb shell "su -mm -c '/data/local/tmp/stage-photos.sh /data/local/tmp/nas-ro \
@@ -213,8 +250,10 @@ Tell the user, in these words: **profile picture (top right) → Photos settings
 
 `NAS-Inbox` will probably **not** appear in that list, even with correct `bucket_display_name` and `is_pending=0`. Have them enable **Back up all device folders** instead; uploads then work. Confirm the result is **original quality** — that is the entire premise of using this phone, and only a real upload proves it.
 
-## 11. State reached on 2026-08-02
+## 12. State reached on 2026-08-02
 
 Working and persistent across reboots: custom kernel `3.18.137-nas1+` with Magisk root; QNAP subdirectory mounted read-only over SMB 3.0, auto-mounting ~55 s after boot and surviving Wi-Fi teardown; one photo uploaded to Google Photos at original quality.
 
-Not yet proven: rollback (image verified and preserved, never exercised); boot with the NAS powered off; NFSv3 against a real export; the experimental direct-mount into shared storage; long-term Doze behaviour.
+Also proven: boot with the NAS powered off completes in about 30 seconds, the service fails inside its bounded wait without blocking boot, and leaves no mount behind.
+
+Not yet proven: rollback (image verified and preserved, never exercised); NFSv3 against a real export; the experimental direct-mount into shared storage; long-term Doze behaviour.

@@ -144,6 +144,26 @@ probe_mount() {
   fi
   return 0
 }
+# Monotonic seconds. Android corrects the wall clock during boot once the
+# network is up, which is exactly when this service runs: a backward correction
+# would extend the wait far beyond WAIT_SECONDS and a forward one would end it
+# early. /proc/uptime is unaffected by those corrections.
+monotonic_seconds() { awk '{print int($1)}' /proc/uptime; }
+probe_service_port() {
+  /system/bin/toybox nc -4 -w 2 -q 1 "$NAS_HOST" "$service_port" </dev/null >/dev/null 2>&1
+}
+wait_for_service_port() {
+  # Bounded by elapsed time, not by counting sleeps: each failed probe also
+  # burns the `nc -w 2` connection timeout, so counting only the sleeps made
+  # every wait run for roughly twice WAIT_SECONDS. The final probe may overshoot
+  # the deadline by its own timeout, which is bounded and expected.
+  wait_deadline=$(($(monotonic_seconds) + WAIT_SECONDS))
+  while ! probe_service_port; do
+    [ "$(monotonic_seconds)" -lt "$wait_deadline" ] || return 1
+    sleep 2
+  done
+  return 0
+}
 # End mount probe functions.
 
 trap cleanup_rw_probe EXIT
@@ -178,14 +198,9 @@ if [ "$PROTOCOL" = smb ]; then
 else
   service_port=2049
 fi
-# Bound by wall clock, not by counting sleeps. Each failed probe also burns the
-# `nc -w 2` connection timeout, so counting only the sleeps made every wait run
-# for roughly twice WAIT_SECONDS: a measured 2m06s against a configured 60.
-deadline=$(($(date +%s) + WAIT_SECONDS))
-while ! /system/bin/toybox nc -4 -w 2 -q 1 "$NAS_HOST" "$service_port" </dev/null >/dev/null 2>&1; do
-  [ "$(date +%s)" -lt "$deadline" ] || fail "$PROTOCOL TCP port $service_port did not become reachable within $WAIT_SECONDS seconds"
-  sleep 2
-done
+if ! wait_for_service_port; then
+  fail "$PROTOCOL TCP port $service_port did not become reachable within $WAIT_SECONDS seconds"
+fi
 log "$PROTOCOL TCP port $service_port is reachable"
 
 context_opt=""

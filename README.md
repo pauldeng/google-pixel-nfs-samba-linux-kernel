@@ -4,7 +4,7 @@ A custom Linux 3.18 kernel with built-in NFSv3 and CIFS/SMB2 clients for the fir
 
 - Pixel XL (`marlin`) and Pixel (`sailfish`)
 - Android 10 `QP1A.191005.007.A3`
-- Requires an unlocked bootloader and Magisk root
+- Requires a phone that is **already OEM-unlocked, rooted, and Magisk-patched**. If yours is not, the [runbook](docs/ai-agent-runbook.md) has the procedure, and an AI agent should walk you through it. Unlocking the bootloader **erases the phone**, so do it before you put anything on it.
 
 Verified on hardware: kernel flashed, NAS mounted read-only over SMB 3.0, mount surviving reboots and network loss, photo uploaded at original quality. See [validation status](docs/validation-status.md) for what is proven versus assumed.
 

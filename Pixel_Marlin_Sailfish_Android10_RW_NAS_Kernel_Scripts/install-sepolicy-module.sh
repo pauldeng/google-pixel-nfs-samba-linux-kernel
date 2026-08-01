@@ -78,11 +78,19 @@ printf 'Target: %s / %s / %s\n' "$device" "$build" "$release"
 # `grep -c` exits 1 when it counts zero, which under `set -e` aborted the script
 # on exactly the pre-emptive path this is meant to support. Read the log first,
 # then count locally with the no-match status handled explicitly.
+count_net_raw_denials() {
+  # `grep -c` exits 1 when it counts zero, which under `set -e` previously
+  # aborted the script on exactly the pre-emptive path this is meant to allow.
+  local n
+  n=$(printf '%s\n' "$1" | tr -d '\r' | grep -c 'denied { net_raw }') || n=0
+  printf '%s\n' "$n"
+}
+# End sepolicy helper functions.
 kernel_log=$(root_cmd 'dmesg') || {
   echo "ERROR: could not read the kernel log to check for prior denials" >&2
   exit 1
 }
-denials=$(printf '%s\n' "$kernel_log" | tr -d '\r' | grep -c 'denied { net_raw }') || denials=0
+denials=$(count_net_raw_denials "$kernel_log")
 if [[ $denials =~ ^[0-9]+$ ]] && ((denials > 0)); then
   printf 'Observed net_raw denials in the current boot: %s\n' "$denials"
 else

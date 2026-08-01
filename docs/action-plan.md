@@ -45,7 +45,7 @@ Read Sections 1 through 4 before running anything. Sections 5 through 8 form the
 
 # Executive decision and recommended design
 
-The kernel build is reproducible and the network-filesystem capability is delivered as a custom boot image for the last Android 10 build released for the first-generation Pixel family. End-to-end Google Photos operation was demonstrated on 2026-08-02: a photo read from a read-only NAS mount, staged locally, indexed by MediaStore and uploaded at original quality. It remains a single verified path, not a guarantee about Google account policy. The plan does not build or flash an entire Android operating system. It rebuilds the locked Linux 3.18 kernel, replaces the kernel inside the phone's current boot image, preserves the exact ramdisk and DTB layout, reapplies the Pixel 1 legacy-SAR Magisk kernel patch, tests that image non-persistently, and only then permits a one-slot boot-partition flash.
+The kernel build is reproducible and the network-filesystem capability is delivered as a custom boot image for the last Android 10 build released for the first-generation Pixel family. End-to-end Google Photos operation was demonstrated on 2026-08-02: a photo read from a read-only NAS mount, staged locally, indexed by MediaStore and uploaded at original quality. It remains a single verified path, not a guarantee about Google account policy. The plan does not build or flash an entire Android operating system. It rebuilds the locked Linux 3.18 kernel, replaces the kernel inside the phone's current boot image, preserves the exact ramdisk and DTB layout, reapplies the Pixel 1 legacy-SAR Magisk kernel patch, tests that image non-persistently where the bootloader allows it, and only then permits a one-slot boot-partition flash. Where the bootloader refuses to RAM-boot any image, branch B of the deployment policy applies instead.
 
 | **Decision area** | **Selected approach** | **Reason** |
 |---|---|---|
@@ -59,7 +59,7 @@ The kernel build is reproducible and the network-filesystem capability is delive
 | Google Photos path | Local `/storage/emulated/0/DCIM/NAS-Inbox` populated in bounded batches from the read-only source | Uses the supported local shared-storage/MediaStore path and keeps Photos away from remote write authority |
 | Direct-mount experiment | `/mnt/runtime/{default,read,write}/emulated/0/DCIM/NAS-Inbox`, only after inspecting the exact phone mount table | Android 10 exposes different storage views to different app namespaces; success is not assumed |
 | Automation | Separate Magisk `service.d` policies: read-only source mount by default; optional root-only writer with an effective-`rw` check and write probe | Late execution with a bounded reachability wait; NAS-off boot remains a physical acceptance test |
-| Deployment | `fastboot boot`, then one-slot flash | Reversible acceptance test before persistent change; other slot remains untouched |
+| Deployment | `fastboot boot`, then one-slot flash; branch B where the bootloader refuses to RAM-boot | Reversible acceptance test before persistent change wherever possible; other slot remains untouched |
 | Rollback | Verified dump of the active boot partition | Restores the exact root/ramdisk state that was running before the change |
 
 ## What is and is not being backed up
@@ -538,7 +538,7 @@ Use --device marlin or --device sailfish when you want an explicit expectation. 
 
 **7.** Unpacks the boot image with the installed MagiskBoot and requires separate `kernel`, `kernel_dtb`, and `ramdisk.cpio` components. Any different layout is a hard stop requiring a layout-specific validation pass.
 
-**8.** Repackages the unmodified components first, unpacks that no-op output, and requires byte-identical kernel, DTB, and ramdisk components. This proves the installed MagiskBoot can round-trip the exact current rooted image before customisation.
+**8.** Repackages the unmodified components first, unpacks that no-op output, and requires byte-identical kernel, DTB, and ramdisk components. This proves the installed MagiskBoot can round-trip the exact current rooted image before customisation. Branch-B evidence additionally requires the whole no-op image to be byte-identical to the saved live boot image, because component equality alone cannot rule out a repack defect.
 
 **9.** Replaces only the unpacked `kernel` with the uncompressed custom `Image`. It does not insert `Image.lz4-dtb`; MagiskBoot records the original compression format and recompresses the uncompressed component.
 
@@ -934,7 +934,7 @@ Production policy is:
 | 2. Host | `setup-host-ubuntu-20.04.sh` | Ubuntu 20.04, `lz4c`, ADB/Fastboot, USB access |
 | 3. Source/build | `build-kernel.sh` | Exact peeled commits/trees, untouched supplied checkouts, Image and Image.lz4-dtb, config, manifest, hashes |
 | 4. Backup/package | `device-deploy.sh prepare` | Device/build/serial/slot match; boot dump; no-op/custom component checks; legacy-SAR patch; size gate |
-| 5. Temporary boot | `device-deploy.sh test` | No-op boot and root; custom boot, root, `-nas1`, NFS/CIFS registration |
+| 5. Temporary boot | `device-deploy.sh test` | Branch A: no-op boot and root; custom boot, root, `-nas1`, NFS/CIFS registration. Branch B: recorded bootloader-limitation evidence bound to this exact image |
 | 6. NAS read-only | Reader account/export and `test-nas-mount.sh` | Exact source/type/`ro`; write rejection |
 | 7. Optional NAS write | Separate writer share/export and test | Exact source/type/`rw`; full disposable write probe; recovery test |
 | 8. Photos baseline | `stage-photos.sh` | Copy checksum, explicit MediaStore scan, controlled Photos upload |

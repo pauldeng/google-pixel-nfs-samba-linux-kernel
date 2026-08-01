@@ -32,4 +32,4 @@ Still unvalidated. These are open items, not mandatory gates for the parts alrea
 - the experimental direct-mount-into-shared-storage path;
 - overnight Doze behaviour.
 
-Each remains a gate for the specific capability it covers: do not rely on rollback, NFSv3, the direct shared-storage mount, or unattended NAS-off operation until the matching item is exercised.
+Each remains a gate for the specific capability it covers: do not rely on rollback, NFSv3, or the direct shared-storage mount until the matching item is exercised.
