@@ -34,7 +34,24 @@ if [ "$PROTOCOL" = smb ]; then
   : "${SMB_SHARE:?}" "${SMB_USER:?}" "${SMB_SECRET:?}"
   case "$SMB_SHARE" in *','* | */* | *:* | *' '*) fail "SMB share contains an unsupported separator" ;; esac
   case "$SMB_USER" in *','* | *' '*) fail "SMB user contains an unsupported separator" ;; esac
-  EXPECTED_SOURCE="//$NAS_HOST/$SMB_SHARE"
+  # Optional subdirectory below the share. The locked CIFS client splits a
+  # device name into vol->UNC and vol->prepath, so mounting a directory rather
+  # than the whole share narrows what the phone can see. Spaces are rejected
+  # because /proc/mounts escapes them as \040, which would break the
+  # source-matching that validate_mount depends on.
+  SMB_PREFIX_PATH=${SMB_PREFIX_PATH:-}
+  case "$SMB_PREFIX_PATH" in
+    '') ;;
+    /* | */) fail "SMB prefix path must not start or end with a slash" ;;
+    *,* | *' '* | *\\*) fail "SMB prefix path contains an unsupported character" ;;
+    '..' | '../'* | *'/..' | *'/../'*) fail "SMB prefix path must not contain a parent reference" ;;
+  esac
+  if [ -n "$SMB_PREFIX_PATH" ]; then
+    SMB_SOURCE="//$NAS_HOST/$SMB_SHARE/$SMB_PREFIX_PATH"
+  else
+    SMB_SOURCE="//$NAS_HOST/$SMB_SHARE"
+  fi
+  EXPECTED_SOURCE="$SMB_SOURCE"
 elif [ "$PROTOCOL" = nfs ]; then
   : "${NFS_EXPORT:?}"
   case "$NFS_EXPORT" in /*) ;; *) fail "NFS export must be an absolute path" ;; esac
@@ -181,7 +198,7 @@ if [ "$PROTOCOL" = smb ]; then
   esac
   modes="file_mode=0444,dir_mode=0555"
   [ "$MOUNT_MODE" = rw ] && modes="file_mode=0664,dir_mode=0775"
-  /system/bin/mount -t cifs "//$NAS_HOST/$SMB_SHARE" "$TARGET" \
+  /system/bin/mount -t cifs "$SMB_SOURCE" "$TARGET" \
     -o "$MOUNT_MODE,vers=3.0,sec=ntlmssp,username=$SMB_USER,password=$PASS,uid=1023,gid=1023,forceuid,forcegid,$modes,noperm,iocharset=utf8,nosuid,nodev,noexec$context_opt"
   unset PASS
 elif [ "$PROTOCOL" = nfs ]; then

@@ -1,6 +1,7 @@
 PROTOCOL=smb
 NAS_HOST=192.168.1.20
 SMB_SHARE=pixel-phone-stage
+SMB_PREFIX_PATH=
 SMB_USER=pixel_nas_writer
 SMB_SECRET=/data/adb/nas-smb.secret
 TARGET=/data/local/tmp/nas-rw

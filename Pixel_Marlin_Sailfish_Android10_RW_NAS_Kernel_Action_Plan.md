@@ -690,7 +690,7 @@ Copy and edit the external configuration, keeping the root-only target:
 cd Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts
 cp nas-mount-smb-ro.conf.example nas-mount.conf
 chmod 0600 nas-mount.conf
-# Edit NAS_HOST, SMB_SHARE, and SMB_USER.
+# Edit NAS_HOST, SMB_SHARE, SMB_USER, and optionally SMB_PREFIX_PATH.
 ```
 
 Create a password file using an editor or hidden-input procedure that does not place the real password in shell history, then run:
@@ -700,7 +700,9 @@ chmod 0600 nas-smb.secret
 ./test-nas-mount.sh nas-mount.conf nas-smb.secret
 ```
 
-The external `90-nas-mount.sh` requires the exact source, filesystem type, and `ro` mode in `/proc/mounts`, then proves that a write is rejected. Confirm on the NAS that the reader account cannot modify the source share.
+The external `90-nas-mount.sh` requires the exact source, filesystem type, and `ro` mode in `/proc/mounts`, then proves that a write is rejected.
+
+`SMB_PREFIX_PATH` is optional and narrows the mount to a directory below the share, for example `SMB_PREFIX_PATH=Photo/Google-Photos-Pixel-Stage`. The locked CIFS client splits a device name into `vol->UNC` and `vol->prepath` (`fs/cifs/connect.c`), so the phone then sees only that directory rather than the whole share. Prefer this over exposing an entire media share: it applies least privilege at the mount as well as at the account. Leading and trailing slashes, commas, spaces, backslashes and parent references are rejected; spaces in particular because `/proc/mounts` escapes them as `\040`, which would break the source matching that mount validation depends on. Confirm on the NAS that the reader account cannot modify the source share.
 
 A root-owned secret file protects the credential at rest and avoids shell-history disclosure. The old kernel has no `mount.cifs` helper and does not parse a userspace `credentials=` file, so the service must briefly expand `password=...` into the mount process arguments. Treat that transient root-visible argument exposure as residual risk.
 
