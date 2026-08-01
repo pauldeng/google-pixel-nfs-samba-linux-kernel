@@ -1,274 +1,69 @@
-# Pixel Marlin/Sailfish Android 10 NAS Kernel
+# Pixel NAS Kernel
 
-Build and safely test a custom Linux 3.18 kernel with built-in NFSv3 and CIFS/SMB2 support for the first-generation Google Pixel family:
+A custom Linux 3.18 kernel with built-in NFSv3 and CIFS/SMB2 clients for the first-generation Google Pixel, turning a retired phone into a dedicated appliance that uploads photos from a NAS to Google Photos at original quality.
 
-- Pixel XL (`marlin`)
-- Pixel (`sailfish`)
-- Android 10 build `QP1A.191005.007.A3`
+- Pixel XL (`marlin`) and Pixel (`sailfish`)
+- Android 10 `QP1A.191005.007.A3`
+- Requires an unlocked bootloader and Magisk root
 
-The project is intended for a dedicated, bootloader-unlocked, Magisk-rooted phone operating on a trusted LAN. It does not build or flash a complete Android operating system.
+Verified on hardware: kernel flashed, NAS mounted read-only over SMB 3.0, mount surviving reboots and network loss, photo uploaded at original quality. See [validation status](docs/validation-status.md) for what is proven versus assumed.
 
-## Start here
+**This flashes a boot partition and can make the phone unbootable.** The workflow keeps a checksummed rollback image and gates the flash behind explicit tokens, but read the [safety model](docs/safety-model.md) before connecting a device.
 
-The engineering plan is the authoritative procedure:
+| Document | Purpose |
+|---|---|
+| [AI agent runbook](docs/ai-agent-runbook.md) | Execution order, exact commands, every trap already hit on hardware |
+| [Action plan](docs/action-plan.md) | Policy, reasoning, and acceptance gates |
+| [Safety model](docs/safety-model.md) | Non-negotiable controls and the recommended data flow |
+| [Quick start](docs/quick-start.md) | Host setup, build, device workflow, NAS testing |
+| [Validation status](docs/validation-status.md) | Proven on hardware versus still unproven |
+| [Device identification](docs/device-identification.md) | Confirming the model and unlockability |
+| [Repository layout](docs/repository-layout.md) | Where everything lives |
+| [Development](docs/development.md) | Formatting, linting, and the `make check` gate |
+| [References](docs/references.md) | Historical context |
 
-- [AI agent runbook](AI_AGENT_RUNBOOK.md) - execution order, exact commands, and every trap already hit on real hardware. Start here if you are an AI assistant, or if you want the short path.
-- [Action plan](Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md) - policy, reasoning, and acceptance gates
-- [Separated companion scripts](Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/)
-- [Companion integrity manifest](Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/SHA256SUMS)
+## Using an AI agent
 
-Do not substitute the old manual compile commands from earlier revisions. The current workflow locks the source and toolchain trees, builds out of tree, packages the kernel through the phone's installed MagiskBoot, proves a no-op repack, temporarily boots before flashing, and keeps an explicit-slot rollback image.
+This project is built to be driven by an AI coding agent. Instructions live in [`AGENTS.md`](AGENTS.md), the provider-neutral single source of truth. [`CLAUDE.md`](CLAUDE.md) imports it, so Claude Code, Codex, and any agent honouring either convention get identical guidance with nothing to keep in sync.
 
-## Safety model
+The agent needs to be able to:
 
-This work can make the phone unbootable and enables network-filesystem parsers in a kernel frozen in 2019. Read the complete action plan before connecting a phone.
+- **Run shell commands** on an Ubuntu 20.04 host with `adb` and `fastboot` available
+- **Reach the phone over USB** and the NAS over the LAN
+- **Hand `sudo` steps back to you.** `sudo` has no TTY inside an agent harness, so package installs must be run by you in a real terminal
+- **Hand SELinux steps back to you.** Permission classifiers commonly block `magiskpolicy` and `install-sepolicy-module.sh`; a well-behaved agent explains the command and lets you run it rather than working around the denial
 
-The non-negotiable controls are:
+You should expect it to:
 
-1. Accept only `marlin` or `sailfish` on the exact Android build above.
-2. Preserve the exact active rooted boot partition and its checksum before packaging.
-3. Replace MagiskBoot's uncompressed kernel component—not blindly flash or insert `Image.lz4-dtb`.
-4. Require the base rooted kernel to contain `want_initramfs`, then apply the matching Pixel 1 legacy-SAR `skip_initramfs` → `want_initramfs` patch to the custom kernel.
-5. Temporarily boot both the no-op and custom images and require Magisk root after each.
-6. Flash only the tested active slot, and only after the operator supplies the exact generated token.
-7. Keep authoritative NAS photographs read-only at both the server and client.
-8. Keep SMB/NFS on a trusted isolated LAN or VLAN; never expose either service to the internet.
+- Tell you **exactly when to press a button on the phone, and when not to touch it**
+- Never invent a flash or rollback token
+- Verify with evidence you can check, rather than asserting success
 
-The scripts do not invent confirmation tokens, reset supplied source checkouts, overwrite an existing rollback image, flash both slots, or run a factory-image installer.
+## Recommended prompt
 
-## Recommended data flow
-
-The supported Google Photos design is:
-
-```text
-read-only NAS source
-        ↓
-/data/local/tmp/nas-ro
-        ↓  bounded, checksum-verified copy
-/storage/emulated/0/DCIM/NAS-Inbox
-        ↓  explicit MediaStore scan
-Google Photos device-folder backup
-```
-
-Directly mounting a NAS share into Android's `/mnt/runtime/*` storage views is experimental. Android 10 uses per-app mount namespaces, separate storage views, SELinux, and MediaStore; a mount visible to root is not necessarily visible to Google Photos.
-
-If phone-to-NAS writes are genuinely required, use a different root-only mount, NAS share, and least-privilege writer identity. Never give Google Photos write access to the authoritative NAS archive.
-
-This project does not guarantee Google Photos entitlement, account behavior, indexing, or future service policy. Validate the exact account and app with a disposable image before relying on the workflow.
-
-## Repository layout
+Paste this to start a session:
 
 ```text
-AI_AGENT_RUNBOOK.md
-Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md
-Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/
-  source-lock.env
-  host-shell-lib.sh
-  nas-kernel.config
-  setup-host-ubuntu-20.04.sh
-  build-kernel.sh
-  device-package.sh
-  device-deploy.sh
-  90-nas-mount.sh
-  test-nas-mount.sh
-  install-sepolicy-module.sh
-  install-nas-service.sh
-  check-nas-namespace.sh
-  verify-nas-service.sh
-  unmount-nas.sh
-  stage-photos.sh
-  nas-mount-*.conf.example
-  nas-smb.secret.example
-  SHA256SUMS
+This repository builds a custom Android 10 kernel with NFS and CIFS support for a
+first-generation Google Pixel, so the phone can mount a NAS share and upload photos
+to Google Photos at original quality.
+
+Read AGENTS.md first, then docs/ai-agent-runbook.md in full before running anything.
+The runbook records traps already hit on real hardware; do not rediscover them.
+
+Then tell me:
+  1. which phase we are at, based on the current state of the repo and the phone
+  2. what you intend to do next and why
+  3. anything you need from me, especially sudo or SELinux steps you cannot run
+
+Rules: verify with evidence rather than assuming. Tell me exactly when to press a
+button on the phone and when not to touch it. Never invent a flash or rollback
+token. Run `make check` before any commit.
 ```
 
-Executable logic is intentionally kept out of the Markdown plan. The plan defines policy, ordering, evidence, and stop conditions; the companion directory contains the implementation.
+If you are resuming rather than starting fresh, add:
 
-Every host script that passes a complete command through `adb shell` to `su -c` sources `host-shell-lib.sh`; the regression suite rejects a return to hand-built nested single quotes.
-
-## Host and build quick start
-
-Use Ubuntu 20.04 as a normal user with `sudo` access. First verify the delivered scripts:
-
-```bash
-cd Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts
-sha256sum -c SHA256SUMS
-./setup-host-ubuntu-20.04.sh
+```text
+Start by checking git log, the phone state over adb, and docs/validation-status.md
+to work out what is already done. Do not repeat completed steps.
 ```
-
-If the setup script adds the user to `plugdev`, log out and back in, then rerun it.
-
-Build into a dedicated workspace:
-
-```bash
-export PIXEL_NAS_WORKSPACE="$HOME/pixel-nas-build-workspace"
-./build-kernel.sh --workspace "$PIXEL_NAS_WORKSPACE" --jobs "$(nproc)"
-```
-
-The script automatically detects the three locked repositories when they are siblings of this repository. It validates them without fetching or writing to them, creates script-owned local clones under the workspace, and registers build worktrees only in those managed clones. This avoids another network download while preserving the supplied repositories' status and Git worktree metadata.
-
-Repositories elsewhere can be supplied explicitly with the same isolation:
-
-```bash
-./build-kernel.sh \
-  --workspace "$PIXEL_NAS_WORKSPACE" \
-  --jobs "$(nproc)" \
-  --kernel-repo ../android-kernel-msm \
-  --aarch64-repo ../aarch64-linux-android-4.9 \
-  --arm32-repo ../arm-linux-androideabi-4.9
-```
-
-Once a managed repository exists under a workspace, it remains authoritative for that workspace. If an explicit repository option is supplied on a later run, the script prints a warning that the option is ignored and directs the operator to use a new workspace to import it.
-
-Verify the generated artifacts:
-
-```bash
-cd "$PIXEL_NAS_WORKSPACE/artifacts/common"
-sha256sum -c SHA256SUMS
-grep -E 'kernel_commit|kernel_release|supported_devices' build-manifest.txt
-```
-
-Expected outputs include:
-
-- `Image`: uncompressed kernel used by the MagiskBoot packaging workflow
-- `Image.lz4-dtb`: compressed build proof with appended device trees; not flashed directly
-- `kernel.config` and `defconfig`
-- `source-lock.env` and `build-manifest.txt`
-- `SHA256SUMS`
-
-## Device workflow
-
-The phone must have an unlocked bootloader, USB debugging, authorised ADB access, and working Magisk root. Confirm the exact device and build before continuing:
-
-```bash
-adb devices
-adb shell getprop ro.product.device
-adb shell getprop ro.build.id
-adb shell getprop ro.boot.slot_suffix
-adb shell su -c id
-```
-
-From the companion directory, prepare the active-slot backup and device-specific images:
-
-```bash
-./device-deploy.sh prepare \
-  --workspace "$PIXEL_NAS_WORKSPACE" \
-  --device auto
-```
-
-Then temporarily boot the no-op image followed by the custom image:
-
-```bash
-./device-deploy.sh test \
-  --workspace "$PIXEL_NAS_WORKSPACE" \
-  --device auto
-```
-
-Stop if either temporary boot fails, Magisk root disappears, `uname -r` lacks `-nas1`, or NFS/CIFS is absent from `/proc/filesystems`.
-
-Permanent flash and rollback are intentionally not abbreviated here. Follow Sections 8 and 11 of the action plan and use only the exact device/slot/hash-bound commands and tokens printed by `device-deploy.sh`.
-
-## NAS testing
-
-The production baseline is a read-only photo source. SMB requires a numeric IPv4 address, a dedicated non-administrator reader account, and a NAS that accepts SMB 3.0/3.02 without requiring SMB 3.1.1 or transport encryption. NFSv3 requires a numeric source address and the explicit `addr=<NAS_IP>` option supplied by the mount script.
-
-Copy an example configuration outside the integrity-covered companion files, edit it, and run the manual test wrapper:
-
-```bash
-mkdir -p ../pixel-nas-operator-config
-cp nas-mount-smb-ro.conf.example ../pixel-nas-operator-config/nas-mount.conf
-cp nas-smb.secret.example ../pixel-nas-operator-config/nas-smb.secret
-chmod 0600 ../pixel-nas-operator-config/nas-mount.conf \
-  ../pixel-nas-operator-config/nas-smb.secret
-
-# Edit the copied configuration and replace the placeholder secret securely.
-./test-nas-mount.sh \
-  ../pixel-nas-operator-config/nas-mount.conf \
-  ../pixel-nas-operator-config/nas-smb.secret
-```
-
-The read-only test requires the exact source, filesystem type, and `ro` mode, then proves that a root write is rejected. NFS and isolated read/write examples are documented in Section 9 of the action plan.
-
-Before installing the persistent service, install the SELinux module:
-
-```bash
-./install-sepolicy-module.sh
-```
-
-It carries one rule, `allow kernel kernel capability net_raw`. Without it the in-kernel CIFS client cannot rebuild its socket after a network interruption: the session drops during doze, `cifsd` is denied `net_raw`, and the mount stays listed in `/proc/mounts` while every read returns `Host is down`. On a file-based-encrypted device Magisk stages module rules for the *next* boot, so allow **two reboots** before judging whether it worked.
-
-Install a persistent Magisk service only after the corresponding manual test passes. The service uses a bounded TCP connection check against port 445 for SMB or 2049 for NFS, so NAS appliances that intentionally reject ICMP remain supported. After reboot, run `./verify-nas-service.sh`; it compares the mount from independent `su -mm` and plain `su` shells launched through adb instead of accepting only the service's own view. A pass establishes host-shell visibility only—it does not inspect Google Photos or any other app namespace.
-
-## Validation status
-
-Verified locally on 1 August 2026:
-
-- exact repository origins, peeled refs, commits, and tree objects;
-- complete out-of-tree kernel build with the locked GCC 4.9 toolchains;
-- `Image`, `Image.lz4-dtb`, configuration, manifest, and artifact checksums;
-- incremental rerun using existing local downloads without an unnecessary fetch;
-- isolated local imports that leave supplied repository status and worktree metadata unchanged;
-- a network-only fresh shallow-clone source-preparation run using `--no-local-autodetect --sources-only`;
-- `shfmt` v3.13.1 shell formatting, ShellCheck v0.11.0 static analysis, and `rumdl` v0.2.47 Markdown formatting/linting;
-- Bash/POSIX shell syntax and executable modes for the separated scripts;
-- Bash/Dash regression coverage for conditional functional-probe failures;
-- companion `SHA256SUMS` coverage and verification.
-
-The successful build reported kernel release `3.18.137-nas1+`. The trailing `+` is expected for this clean detached Git worktree; acceptance requires the `-nas1` marker.
-
-Validated on hardware 2026-08-02 (Pixel / sailfish):
-
-- custom kernel flashed to the active slot; `uname -r` reports `3.18.137-nas1+` with Magisk root intact;
-- QNAP `Multimedia/Photo/...` mounted read-only over SMB 3.0 at a root-only path, reads byte-identical to the NAS copy, writes refused;
-- mount returns automatically about 55 seconds after boot and survives a full Wi-Fi teardown;
-- a staged photo reached Google Photos at original quality.
-
-Still unvalidated:
-
-- `fastboot boot` is unsupported on this bootloader; see 8.3.1 of the plan;
-- rollback (the image is verified and preserved but has not been exercised);
-- NFSv3 against a real export;
-- the experimental direct-mount-into-shared-storage path;
-- boot with the NAS powered off, and overnight Doze behaviour.
-
-These are mandatory acceptance gates, not optional follow-up work.
-
-## Formatting
-
-All Bash and POSIX shell scripts are formatted with [`shfmt`](https://github.com/mvdan/sh), statically checked with [ShellCheck](https://github.com/koalaman/shellcheck), and Markdown is formatted and linted with [`rumdl`](https://github.com/rvben/rumdl). The repository pins shfmt v3.13.1, ShellCheck v0.11.0, and rumdl v0.2.47, then verifies the official Linux release SHA-256 values before installing each tool under the ignored `.tools/` directory.
-
-Run both formatters after every shell or Markdown edit:
-
-```bash
-make format
-```
-
-Run every non-mutating quality and regression check before committing:
-
-```bash
-make check
-```
-
-The individual formatting targets are `format-shell`, `check-shell-format`, `format-markdown`, and `check-markdown`; `check-shellcheck` runs static analysis. Policy is stored in `.editorconfig` and `.rumdl.toml`; `shfmt` detects Bash and POSIX dialects from each script's shebang. GitHub Actions runs `make check` whenever Markdown, shell scripts, tests, or quality configuration changes.
-
-## Device identification
-
-Enable Developer options by tapping **Settings → About phone → Build number** seven times, then inspect **Settings → System → Advanced → Developer options → OEM unlocking**.
-
-![Pixel build number screen](imgs/pixel-build-number.png)
-
-![Pixel OEM unlocking option](imgs/pixel-phone-oem-unlocking-option.png)
-
-If OEM unlocking cannot be enabled, do not use this kernel deployment workflow.
-
-The following seller photograph records only the physical source of the project phone; it is not evidence of model, storage capacity, bootloader state, or working condition. Verify those properties on-device.
-
-![Batch of first-generation Pixel phones from the seller](imgs/seller.png)
-
-## Historical references
-
-- [AOSP marlin kernel source](https://android.googlesource.com/kernel/msm)
-- [Pixel Backup Gang](https://github.com/master-hax/pixel-backup-gang)
-- [Pixel 1 Android 10 kernel compilation notes](https://reao.io/330)
-
-Primary technical references for the source lock, Magisk legacy-SAR behavior, Android storage views, CIFS/NFS limitations, ADB quoting, Termux, and Google Photos are maintained in Appendix C of the action plan.

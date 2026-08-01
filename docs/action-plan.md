@@ -344,7 +344,7 @@ Interactive menuconfig is not required for the reproducible path. If used for ex
 
 The historical screenshot below illustrates where NFS/CIFS appeared during manual exploration. It is not the locked configuration: unrelated selections visible in it, including NFSv4, are not instructions.
 
-![Historical Linux menuconfig Network File Systems screen](imgs/linux-kernel-menuconfig-enable-nfs-cifs.png)
+![Historical Linux menuconfig Network File Systems screen](../imgs/linux-kernel-menuconfig-enable-nfs-cifs.png)
 
 ``` bash
 make O="$OUT" marlin_defconfig

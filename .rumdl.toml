@@ -7,4 +7,4 @@ cache-dir = ".tools/cache/rumdl"
 disable = ["MD013"]
 
 [per-file-ignores]
-"Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md" = ["MD025"]
+"docs/action-plan.md" = ["MD025"]
