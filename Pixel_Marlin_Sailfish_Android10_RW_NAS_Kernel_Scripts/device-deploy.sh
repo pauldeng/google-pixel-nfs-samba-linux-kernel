@@ -162,10 +162,13 @@ bootloader_rejects_ram_boot() {
   # boots from flash. Pixel 1 answers "dtb not found" because its device trees
   # are appended to the kernel and only the flash path scans them; measured on
   # Fastboot 28.0.2, 29.0.5, 31.0.3 and 37.0.1.
+  #
+  # Matched against the whole "FAILED (remote: ...)" phrase rather than a bare
+  # substring, so unrelated output mentioning the same words cannot be mistaken
+  # for a bootloader limitation.
   case "${1,,}" in
-    *"dtb not found"*) return 0 ;;
-    *"unknown command"*) return 0 ;;
-    *"not supported in locked device"*) return 1 ;;
+    *"failed (remote: 'dtb not found')"* | *"failed (remote: dtb not found)"*) return 0 ;;
+    *"failed (remote: 'unknown command')"* | *"failed (remote: unknown command)"*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -233,6 +236,8 @@ case "$action" in
       exit 1
     }
     (cd "$state_dir" && sha256sum noop-boot.img custom-boot.img >packaged-images.sha256)
+    # Regenerating the images invalidates any earlier verdict about them.
+    rm -f "$state_dir/test-success.env" "$state_dir/test-unsupported.env" "$state_dir/untested-flash.env"
     original_uname=$(adb -s "$serial" shell uname -r | tr -d '\r')
     fingerprint=$(adb_prop ro.build.fingerprint)
     {
@@ -270,15 +275,28 @@ case "$action" in
     # proof of a bootloader limitation rather than a defect in our image, and it
     # is the only condition under which an untested flash may later be
     # authorised. Any other failure leaves no evidence behind on purpose.
+    noop_sha=$(sha256sum "$state_dir/noop-boot.img" | awk '{print $1}')
+    original_sha=$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')
     noop_status=0
     noop_output=$(fastboot -s "$serial" boot "$state_dir/noop-boot.img" 2>&1) || noop_status=$?
     printf '%s\n' "$noop_output"
     if ((noop_status != 0)); then
+      # Branch-B evidence is only as strong as its control. Grant it solely when
+      # the refused image is byte-identical to the boot image the bootloader
+      # currently boots from flash; component-equivalence is not enough to rule
+      # out a defect introduced by repacking.
+      if [[ $noop_sha != "$original_sha" ]]; then
+        echo "ERROR: 'fastboot boot' was refused, but the no-op image is not byte-identical" >&2
+        echo "to the live boot image, so this does not prove a bootloader limitation." >&2
+        echo "  no-op:    $noop_sha" >&2
+        echo "  original: $original_sha" >&2
+        echo "Investigate the repack before considering an untested flash." >&2
+        exit 1
+      fi
       if bootloader_rejects_ram_boot "$noop_output"; then
-        printf 'reason=%q\nfastboot_output=%q\ncustom_boot_sha=%q\nnoop_boot_sha=%q\nrecorded_utc=%q\n' \
-          'bootloader rejected a RAM-booted image that it boots from flash' \
-          "$noop_output" "$custom_sha" \
-          "$(sha256sum "$state_dir/noop-boot.img" | awk '{print $1}')" \
+        printf 'reason=%q\nfastboot_output=%q\ncustom_boot_sha=%q\nnoop_boot_sha=%q\noriginal_boot_sha=%q\nrecorded_utc=%q\n' \
+          'bootloader refused a RAM-booted image byte-identical to the live boot partition' \
+          "$noop_output" "$custom_sha" "$noop_sha" "$original_sha" \
           "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           >"$state_dir/test-unsupported.env"
         echo "ERROR: this bootloader cannot RAM-boot an image it boots from flash." >&2
@@ -365,11 +383,25 @@ case "$action" in
         exit 1
       }
       custom_boot_sha=""
+      noop_boot_sha=""
+      original_boot_sha=""
       # shellcheck source=/dev/null
       . "$state_dir/test-unsupported.env"
       [[ $custom_boot_sha == "$current_sha" ]] || {
         echo "ERROR: the recorded bootloader-limitation evidence refers to a different" >&2
         echo "image than the one about to be flashed. Rerun 'test'." >&2
+        exit 1
+      }
+      # The evidence is only valid for the control it was gathered against, so
+      # a regenerated no-op or rollback image invalidates it.
+      [[ $noop_boot_sha == "$(sha256sum "$state_dir/noop-boot.img" | awk '{print $1}')" ]] || {
+        echo "ERROR: the no-op control image changed since the evidence was recorded." >&2
+        echo "Rerun 'test'." >&2
+        exit 1
+      }
+      [[ $original_boot_sha == "$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')" ]] || {
+        echo "ERROR: the rollback image changed since the evidence was recorded." >&2
+        echo "Rerun 'test'." >&2
         exit 1
       }
       expected_untested="UNTESTED:$device:$slot:${current_sha:0:12}"
@@ -405,13 +437,6 @@ case "$action" in
       echo "ERROR: exact flash token required: $expected" >&2
       exit 1
     }
-    # Recorded only once every gate has passed, so the file never claims an
-    # untested flash that was refused.
-    if ((${untested_flash:-0})); then
-      printf 'untested_flash_utc=%q\nuntested_flash_sha=%q\nrollback_sha=%q\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$current_sha" "$original_sha" \
-        >"$state_dir/untested-flash.env"
-    fi
     # From here the boot partition may change, so keep the exact recovery
     # command on screen for any non-zero exit, including a failed boot.
     rollback_sha=$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')
@@ -436,7 +461,19 @@ case "$action" in
     adb -s "$serial" reboot bootloader
     check_fastboot_state
     check_partition_size "$state_dir/custom-boot.img"
+    # Split into attempt and completion. An ADB or Fastboot failure before the
+    # write must not leave a record claiming the partition was changed, and a
+    # failure during the write must still leave a trace that it was started.
+    if ((${untested_flash:-0})); then
+      printf 'untested_flash_attempted_utc=%q\nuntested_flash_sha=%q\nrollback_sha=%q\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$current_sha" "$original_sha" \
+        >"$state_dir/untested-flash.env"
+    fi
     fastboot -s "$serial" flash "boot_$slot" "$state_dir/custom-boot.img"
+    if ((${untested_flash:-0})); then
+      printf 'untested_flash_completed_utc=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        >>"$state_dir/untested-flash.env"
+    fi
     fastboot -s "$serial" reboot
     wait_adb
     [[ $(adb -s "$serial" shell uname -r | tr -d '\r') == *-nas1* ]] || {

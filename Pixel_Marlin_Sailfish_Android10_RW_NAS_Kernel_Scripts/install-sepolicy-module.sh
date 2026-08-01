@@ -74,7 +74,15 @@ printf 'Target: %s / %s / %s\n' "$device" "$build" "$release"
 
 # Report whether the denial this rule addresses has actually been observed.
 # Not a gate: installing before the first network interruption is legitimate.
-denials=$(root_cmd 'dmesg | grep -c "denied { net_raw }"' | tr -d '\r')
+#
+# `grep -c` exits 1 when it counts zero, which under `set -e` aborted the script
+# on exactly the pre-emptive path this is meant to support. Read the log first,
+# then count locally with the no-match status handled explicitly.
+kernel_log=$(root_cmd 'dmesg') || {
+  echo "ERROR: could not read the kernel log to check for prior denials" >&2
+  exit 1
+}
+denials=$(printf '%s\n' "$kernel_log" | tr -d '\r' | grep -c 'denied { net_raw }') || denials=0
 if [[ $denials =~ ^[0-9]+$ ]] && ((denials > 0)); then
   printf 'Observed net_raw denials in the current boot: %s\n' "$denials"
 else

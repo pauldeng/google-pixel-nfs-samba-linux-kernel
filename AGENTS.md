@@ -44,7 +44,7 @@ make format         # apply shfmt + rumdl
 ## Hard rules
 
 - **Never invent a flash or rollback token.** The scripts print them. Do not type one on the user's behalf without explicit authorisation for that specific action.
-- **Never flash both slots.** One tested slot only.
+- **Never flash both slots.** One recorded slot only, and only with branch-A or branch-B evidence for that exact image.
 - **Never reset, clean, or delete a user checkout** or a dirty managed worktree.
 - **Never disable SELinux** or add a broad allow rule. Derive narrow rules from observed AVC evidence only.
 - **Never suggest `sudo adb`.** Fix udev instead.

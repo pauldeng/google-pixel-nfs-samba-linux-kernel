@@ -45,7 +45,7 @@ Read Sections 1 through 4 before running anything. Sections 5 through 8 form the
 
 # Executive decision and recommended design
 
-The kernel build is reproducible and the requested network-filesystem capability is technically achievable as a custom boot image for the last Android 10 build released for the first-generation Pixel family. End-to-end Google Photos operation is not yet proven. The plan does not build or flash an entire Android operating system. It rebuilds the locked Linux 3.18 kernel, replaces the kernel inside the phone's current boot image, preserves the exact ramdisk and DTB layout, reapplies the Pixel 1 legacy-SAR Magisk kernel patch, tests that image non-persistently, and only then permits a one-slot boot-partition flash.
+The kernel build is reproducible and the network-filesystem capability is delivered as a custom boot image for the last Android 10 build released for the first-generation Pixel family. End-to-end Google Photos operation was demonstrated on 2026-08-02: a photo read from a read-only NAS mount, staged locally, indexed by MediaStore and uploaded at original quality. It remains a single verified path, not a guarantee about Google account policy. The plan does not build or flash an entire Android operating system. It rebuilds the locked Linux 3.18 kernel, replaces the kernel inside the phone's current boot image, preserves the exact ramdisk and DTB layout, reapplies the Pixel 1 legacy-SAR Magisk kernel patch, tests that image non-persistently, and only then permits a one-slot boot-partition flash.
 
 | **Decision area** | **Selected approach** | **Reason** |
 |---|---|---|
@@ -578,7 +578,9 @@ The script rechecks device, build, serial, and slot; enters Fastboot; records Fa
 
 > **Do not bypass a failed temporary test**
 >
-> If fastboot boot is rejected, Android does not complete boot, root disappears, the slot changes unexpectedly, or the runtime kernel/config evidence is wrong, stop. Return to the stock/current boot state and investigate. The flash mode requires matching test evidence and will not proceed without it.
+> If Android does not complete boot, root disappears, the slot changes unexpectedly, or the runtime kernel/config evidence is wrong, stop. Those are branch-A failures of the image itself and forbid a permanent flash.
+>
+> A `fastboot boot` rejection is different, and only when it refuses an image byte-identical to the live boot partition: that is a bootloader limitation, and branch B of the deployment policy applies. Return to the stock/current boot state and investigate. The flash mode requires matching test evidence and will not proceed without it.
 
 ## 8.2 Perform functional tests while temporarily booted
 
@@ -1005,7 +1007,7 @@ Production policy is:
 
 **[ ]** Android boots with NAS unavailable and overnight Wi-Fi/Doze behavior is acceptable.
 
-**[ ]** Permanent flash writes only the tested recorded slot.
+**[ ]** Permanent flash writes only the recorded slot, and only with branch-A test evidence or branch-B bootloader-limitation evidence for that exact image.
 
 **[ ]** Rollback remains accessible and checksummed.
 
@@ -1099,7 +1101,7 @@ BOOT
   Checksummed active-slot dump and no-op MagiskBoot round trip
   Uncompressed Image replaces kernel; kernel_dtb and ramdisk preserved
   skip_initramfs -> want_initramfs Legacy-SAR patch
-  Temporary no-op/custom boots with root; one tested slot only
+  Temporary no-op/custom boots with root, or recorded bootloader-limitation evidence; one slot only
 
 NAS
   Authoritative source read-only; optional separate root-only writer

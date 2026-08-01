@@ -11,7 +11,7 @@ The non-negotiable controls are:
 3. Replace MagiskBoot's uncompressed kernel component—not blindly flash or insert `Image.lz4-dtb`.
 4. Require the base rooted kernel to contain `want_initramfs`, then apply the matching Pixel 1 legacy-SAR `skip_initramfs` → `want_initramfs` patch to the custom kernel.
 5. Temporarily boot both the no-op and custom images and require Magisk root after each. Where the bootloader refuses to RAM-boot any image, follow branch B of the deployment policy in [action-plan.md](action-plan.md); it is evidence-gated and is the only route to a flash without a temporary test.
-6. Flash only the tested active slot, and only after the operator supplies the exact generated token.
+6. Flash only the recorded active slot, and only after the operator supplies the exact generated token. "Tested" means branch-A temporary-boot evidence, or branch-B bootloader-limitation evidence bound to that exact image; never neither.
 7. Keep authoritative NAS photographs read-only at both the server and client.
 8. Keep SMB/NFS on a trusted isolated LAN or VLAN; never expose either service to the internet.
 
