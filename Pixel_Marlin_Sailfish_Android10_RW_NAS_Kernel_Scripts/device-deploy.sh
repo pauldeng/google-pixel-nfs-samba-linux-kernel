@@ -172,6 +172,38 @@ bootloader_rejects_ram_boot() {
     *) return 1 ;;
   esac
 }
+classify_untested_evidence() {
+  # Decide whether recorded bootloader-limitation evidence still authorises an
+  # untested flash. Emits a verdict word so the decision can be exercised
+  # directly against a state directory rather than inferred from a message.
+  #
+  # Evidence is valid only for the exact three images it was gathered against:
+  # a regenerated no-op control or rollback image invalidates it, because
+  # neither the proof nor the recovery path would still refer to reality.
+  local dir=$1 want_custom=$2
+  local custom_boot_sha="" noop_boot_sha="" original_boot_sha=""
+  [[ -f $dir/test-unsupported.env ]] || {
+    printf 'no-evidence\n'
+    return 1
+  }
+  # shellcheck source=/dev/null
+  . "$dir/test-unsupported.env"
+  [[ $custom_boot_sha == "$want_custom" ]] || {
+    printf 'custom-mismatch\n'
+    return 1
+  }
+  [[ -f $dir/noop-boot.img && $noop_boot_sha == "$(sha256sum "$dir/noop-boot.img" | awk '{print $1}')" ]] || {
+    printf 'noop-mismatch\n'
+    return 1
+  }
+  [[ -f $dir/original-boot.img && $original_boot_sha == "$(sha256sum "$dir/original-boot.img" | awk '{print $1}')" ]] || {
+    printf 'rollback-mismatch\n'
+    return 1
+  }
+  printf 'ok\n'
+  return 0
+}
+# End deployment decision helpers.
 check_partition_size() {
   local image=$1 raw size image_size
   raw=$(fastboot_value "partition-size:boot_$slot")
@@ -374,36 +406,37 @@ case "$action" in
       # An untested flash is permitted only when `test` proved the bootloader
       # cannot RAM-boot at all. A custom image that boots but fails the kernel
       # identity or NFS/CIFS checks leaves no evidence, so it cannot reach here.
-      [[ -f $state_dir/test-unsupported.env ]] || {
-        echo "ERROR: temporary-test evidence is absent and no bootloader-limitation" >&2
-        echo "evidence was recorded. Run 'test' first." >&2
-        echo "An untested flash requires 'test' to have proven that this bootloader" >&2
-        echo "rejects a RAM-booted image it boots from flash. A custom image that" >&2
-        echo "boots but fails validation is never eligible." >&2
-        exit 1
-      }
-      custom_boot_sha=""
-      noop_boot_sha=""
-      original_boot_sha=""
-      # shellcheck source=/dev/null
-      . "$state_dir/test-unsupported.env"
-      [[ $custom_boot_sha == "$current_sha" ]] || {
-        echo "ERROR: the recorded bootloader-limitation evidence refers to a different" >&2
-        echo "image than the one about to be flashed. Rerun 'test'." >&2
-        exit 1
-      }
-      # The evidence is only valid for the control it was gathered against, so
-      # a regenerated no-op or rollback image invalidates it.
-      [[ $noop_boot_sha == "$(sha256sum "$state_dir/noop-boot.img" | awk '{print $1}')" ]] || {
-        echo "ERROR: the no-op control image changed since the evidence was recorded." >&2
-        echo "Rerun 'test'." >&2
-        exit 1
-      }
-      [[ $original_boot_sha == "$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')" ]] || {
-        echo "ERROR: the rollback image changed since the evidence was recorded." >&2
-        echo "Rerun 'test'." >&2
-        exit 1
-      }
+      evidence_verdict=$(classify_untested_evidence "$state_dir" "$current_sha")
+      case "$evidence_verdict" in
+        ok) ;;
+        no-evidence)
+          echo "ERROR: temporary-test evidence is absent and no bootloader-limitation" >&2
+          echo "evidence was recorded. Run 'test' first." >&2
+          echo "An untested flash requires 'test' to have proven that this bootloader" >&2
+          echo "rejects a RAM-booted image it boots from flash. A custom image that" >&2
+          echo "boots but fails validation is never eligible." >&2
+          exit 1
+          ;;
+        custom-mismatch)
+          echo "ERROR: the recorded bootloader-limitation evidence refers to a different" >&2
+          echo "image than the one about to be flashed. Rerun 'test'." >&2
+          exit 1
+          ;;
+        noop-mismatch)
+          echo "ERROR: the no-op control image changed since the evidence was recorded." >&2
+          echo "Rerun 'test'." >&2
+          exit 1
+          ;;
+        rollback-mismatch)
+          echo "ERROR: the rollback image changed since the evidence was recorded." >&2
+          echo "Rerun 'test'." >&2
+          exit 1
+          ;;
+        *)
+          echo "ERROR: unrecognised evidence verdict: $evidence_verdict" >&2
+          exit 1
+          ;;
+      esac
       expected_untested="UNTESTED:$device:$slot:${current_sha:0:12}"
       [[ $confirm_untested == "$expected_untested" ]] || {
         echo "ERROR: this bootloader cannot run the reversible test. To flash anyway:" >&2

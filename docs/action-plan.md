@@ -952,8 +952,8 @@ Production policy is:
 - Never type a flash or rollback confirmation token on behalf of the user.
 - Never flash both boot slots.
 - Never package `Image.lz4-dtb` blindly as MagiskBoot's `kernel` component.
-- Require the no-op repack test before the custom image test.
-- Require Magisk root after both temporary boots.
+- Require the no-op repack test before the custom image test. Where the bootloader refuses to RAM-boot, require recorded branch-B evidence instead; never neither.
+- Require Magisk root after both temporary boots on branch A, and after the persistent flash on either branch.
 - Run multiline device logic from pushed scripts; do not pass it as an unquoted `adb shell su -c` argument.
 - Route every host-side command passed through adb to `su -c` or `su -mm -c` through the shared `host-shell-lib.sh` quoting helper; do not hand-build nested single quotes.
 - Keep the authoritative NAS source read-only at both server and client.
@@ -989,9 +989,9 @@ Production policy is:
 
 **[ ]** Resolved config contains NFSv3 and CIFS/SMB2 and no nonexistent `CONFIG_CIFS_SMB311` assertion.
 
-**[ ]** No-op MagiskBoot image boots with root.
+**[ ]** Branch A: no-op MagiskBoot image boots with root. Branch B: `test-unsupported.env` recorded against a no-op image byte-identical to the live boot partition.
 
-**[ ]** Custom temporary image boots with root and `-nas1`.
+**[ ]** Branch A: custom temporary image boots with root and `-nas1`. Branch B: not applicable; `-nas1` and root are verified after the persistent flash instead.
 
 **[ ]** `nfs` and `cifs` are registered.
 

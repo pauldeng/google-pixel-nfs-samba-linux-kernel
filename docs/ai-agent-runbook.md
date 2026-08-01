@@ -60,7 +60,16 @@ fastboot reboot
 **If the user has not done this, help them — do not just refuse.** It is a prerequisite, not an obstacle, and it is the step most likely to stall a newcomer. Walk them through it in this order, and be explicit about the destructive part:
 
 1. **Enable Developer options.** Settings → About phone → tap **Build number** seven times.
-2. **Enable OEM unlocking and USB debugging.** Settings → System → Advanced → Developer options. If **OEM unlocking** is greyed out, the device is carrier-locked and this project cannot proceed; say so plainly.
+2. **Enable OEM unlocking and USB debugging.** Settings → System → Advanced → Developer options.
+
+   If **OEM unlocking** is greyed out, do not conclude carrier lock yet. Work through these first:
+   - **Connect to the internet and wait a few minutes.** The device must check in with Google before the toggle becomes available; this is the most common cause and AOSP calls it out explicitly.
+   - **Reboot** and look again.
+   - **Complete account setup.** A device still in initial setup, or with no account, often keeps the toggle disabled.
+   - **Check for device management.** A work profile or MDM enrolment can block it.
+
+   Only after all of those does carrier or SIM locking become the likely explanation, and then this project cannot proceed on that phone.
+
 3. **Unlock the bootloader.** Tell the user in these words: *this erases everything on the phone.* Have them back up anything they care about first.
 
    ```bash
@@ -68,14 +77,57 @@ fastboot reboot
    fastboot flashing unlock
    ```
 
-   **Tell the user to press Volume-Up to highlight "Unlock the bootloader", then Power to confirm.** The phone then factory-resets and reboots. They must walk through Android setup again and re-enable USB debugging.
-4. **Install Magisk.** Have them install the Magisk APK, obtain the factory `boot.img` matching `QP1A.191005.007.A3`, patch it in the Magisk app, pull the patched image to the host, and flash it:
+   **Tell the user to press Volume-Up to highlight "Unlock the bootloader", then Power to confirm.** The phone factory-resets and reboots. They must walk through Android setup again and re-enable USB debugging.
+
+4. **Install Magisk.** This writes the boot partition, so apply the same discipline the rest of this project uses rather than the bare command from Magisk's own guide. Record state, verify provenance, keep a rollback, and re-check immediately before writing.
 
    ```bash
-   adb reboot bootloader
-   fastboot flash boot magisk_patched.img
-   fastboot reboot
+   # a. Bind the work to this exact phone.
+   serial=$(adb get-serialno)
+   device=$(adb shell getprop ro.product.device | tr -d '\r')
+   build=$(adb shell getprop ro.build.id | tr -d '\r')
+   slot=$(adb shell getprop ro.boot.slot_suffix | tr -d '\r'); slot=${slot#_}
+   printf 'serial=%s device=%s build=%s slot=%s\n' "$serial" "$device" "$build" "$slot"
    ```
+
+   Stop unless `device` is `marlin` or `sailfish`, `build` is exactly `QP1A.191005.007.A3`, and `slot` is `a` or `b`.
+
+   ```bash
+   # b. Obtain the factory image for THAT build and keep its checksum.
+   #    Extract boot.img from the matching factory archive from
+   #    https://developers.google.com/android/images and record provenance:
+   sha256sum boot.img | tee boot.img.sha256
+   ```
+
+   The image must match the build reported above. A `boot.img` from any other build is a hard stop.
+
+   ```bash
+   # c. Patch on THIS device. Magisk requires the image be patched on the
+   #    target phone; a patched image from another device is not valid here.
+   adb push boot.img /sdcard/Download/
+   # In the Magisk app: Install -> Select and Patch a File -> pick boot.img
+   adb pull /sdcard/Download/magisk_patched-*.img ./magisk_patched.img
+   sha256sum magisk_patched.img | tee magisk_patched.img.sha256
+   ```
+
+   ```bash
+   # d. Re-verify immediately before writing, and name the slot explicitly.
+   adb reboot bootloader
+   fastboot -s "$serial" getvar product        # expect: $device
+   fastboot -s "$serial" getvar current-slot   # expect: $slot
+   fastboot -s "$serial" getvar unlocked       # expect: yes
+   ```
+
+   **Ask the user to confirm the flash explicitly at this point.** Do not proceed on implied consent. Then:
+
+   ```bash
+   fastboot -s "$serial" flash "boot_$slot" magisk_patched.img
+   fastboot -s "$serial" reboot
+   ```
+
+   Naming `boot_$slot` rather than `boot` avoids relying on Fastboot's current-slot default on an A/B device.
+
+   **Recovery:** keep `boot.img` and its checksum. If the phone does not boot, hold **Power + Volume-Down**, then `fastboot -s "$serial" flash "boot_$slot" boot.img`. Tell the user to record that command somewhere off the host before step d.
 
 5. **Re-verify** with the block at the top of this section. `su -c id` must return `uid=0(root)`.
 

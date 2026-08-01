@@ -122,21 +122,83 @@ check "wait reads a monotonic source, not the wall clock" yes \
   "$(grep -q '/proc/uptime' "$SCRIPTS/90-nas-mount.sh" && ! grep -q 'deadline=.*date +%s' "$SCRIPTS/90-nas-mount.sh" && echo yes || echo no)"
 
 # ------------------------------------------------------------ evidence wiring
-# Guard the invariants that bind branch-B evidence to the images it was
-# gathered against; these are assertions about the script, not simulations.
+# Exercise the real decision path against real state directories rather than
+# searching for error text: a message-only check would still pass if the
+# comparison behind it were deleted.
+eval "$(sed -n '/^classify_untested_evidence()/,/^# End deployment decision helpers\./p' \
+  "$SCRIPTS/device-deploy.sh" | sed '/^# End deployment decision helpers\./d')"
+
+EVIDENCE_ROOT=$(mktemp -d)
+trap 'rm -rf "$EVIDENCE_ROOT"' EXIT
+
+make_state() { # $1 = name; creates a fully consistent state dir, echoes its path
+  local d="$EVIDENCE_ROOT/$1"
+  mkdir -p "$d"
+  printf 'custom-image-bytes\n' >"$d/custom-boot.img"
+  printf 'noop-image-bytes\n' >"$d/noop-boot.img"
+  printf 'original-image-bytes\n' >"$d/original-boot.img"
+  {
+    printf 'custom_boot_sha=%s\n' "$(sha256sum "$d/custom-boot.img" | awk '{print $1}')"
+    printf 'noop_boot_sha=%s\n' "$(sha256sum "$d/noop-boot.img" | awk '{print $1}')"
+    printf 'original_boot_sha=%s\n' "$(sha256sum "$d/original-boot.img" | awk '{print $1}')"
+  } >"$d/test-unsupported.env"
+  printf '%s\n' "$d"
+}
+custom_sha_of() { sha256sum "$1/custom-boot.img" | awk '{print $1}'; }
+
+d=$(make_state good)
+check "consistent evidence authorises the flash" ok \
+  "$(classify_untested_evidence "$d" "$(custom_sha_of "$d")")"
+
+d=$(make_state missing)
+rm -f "$d/test-unsupported.env"
+check "absent evidence is refused" no-evidence \
+  "$(classify_untested_evidence "$d" "$(custom_sha_of "$d")")"
+
+d=$(make_state rebuilt-custom)
+printf 'different-custom-bytes\n' >"$d/custom-boot.img"
+check "evidence for a different custom image is refused" custom-mismatch \
+  "$(classify_untested_evidence "$d" "$(custom_sha_of "$d")")"
+
+d=$(make_state rebuilt-noop)
+printf 'regenerated-noop\n' >"$d/noop-boot.img"
+check "a regenerated no-op control invalidates the evidence" noop-mismatch \
+  "$(classify_untested_evidence "$d" "$(custom_sha_of "$d")")"
+
+d=$(make_state rebuilt-rollback)
+printf 'regenerated-rollback\n' >"$d/original-boot.img"
+check "a changed rollback image invalidates the evidence" rollback-mismatch \
+  "$(classify_untested_evidence "$d" "$(custom_sha_of "$d")")"
+
+d=$(make_state deleted-noop)
+rm -f "$d/noop-boot.img"
+check "a missing no-op control is refused" noop-mismatch \
+  "$(classify_untested_evidence "$d" "$(custom_sha_of "$d")")"
+
+d=$(make_state deleted-rollback)
+rm -f "$d/original-boot.img"
+check "a missing rollback image is refused" rollback-mismatch \
+  "$(classify_untested_evidence "$d" "$(custom_sha_of "$d")")"
+
+d=$(make_state good2)
+check "verdict is non-zero for every refusal" yes \
+  "$(classify_untested_evidence "$EVIDENCE_ROOT/missing" x >/dev/null && echo no || echo yes)"
+
+# Ordering invariants that are genuinely textual: the attempt record must be
+# written after the size check and the completion record after the write.
 deploy=$(cat "$SCRIPTS/device-deploy.sh")
+attempt_at=$(printf '%s\n' "$deploy" | grep -n 'untested_flash_attempted_utc' | head -1 | cut -d: -f1)
+size_at=$(printf '%s\n' "$deploy" | grep -n 'check_partition_size "\$state_dir/custom-boot.img"' | head -1 | cut -d: -f1)
+write_at=$(printf '%s\n' "$deploy" | grep -n 'fastboot -s "\$serial" flash "boot_\$slot" "\$state_dir/custom-boot.img"' | head -1 | cut -d: -f1)
+done_at=$(printf '%s\n' "$deploy" | grep -n 'untested_flash_completed_utc' | head -1 | cut -d: -f1)
+check "attempt is recorded after the partition-size check" yes \
+  "$([[ -n $attempt_at && -n $size_at && $attempt_at -gt $size_at ]] && echo yes || echo no)"
+check "attempt is recorded before the write" yes \
+  "$([[ -n $write_at && $attempt_at -lt $write_at ]] && echo yes || echo no)"
+check "completion is recorded after the write" yes \
+  "$([[ -n $done_at && $done_at -gt $write_at ]] && echo yes || echo no)"
 check "prepare clears stale verdicts" yes \
   "$([[ $deploy == *'rm -f "$state_dir/test-success.env" "$state_dir/test-unsupported.env" "$state_dir/untested-flash.env"'* ]] && echo yes || echo no)"
-check "evidence records all three hashes" yes \
-  "$([[ $deploy == *'noop_boot_sha=%q\noriginal_boot_sha=%q'* ]] && echo yes || echo no)"
-check "flash validates the no-op control hash" yes \
-  "$([[ $deploy == *'the no-op control image changed since the evidence was recorded'* ]] && echo yes || echo no)"
-check "flash validates the rollback hash" yes \
-  "$([[ $deploy == *'the rollback image changed since the evidence was recorded'* ]] && echo yes || echo no)"
-check "evidence requires a byte-identical control" yes \
-  "$([[ $deploy == *'is not byte-identical'* ]] && echo yes || echo no)"
-check "untested record splits attempt from completion" yes \
-  "$([[ $deploy == *untested_flash_attempted_utc* && $deploy == *untested_flash_completed_utc* ]] && echo yes || echo no)"
 
 # ------------------------------------------------------------- retry policy
 # A one-shot service loses to a NAS that boots more slowly than the phone.
