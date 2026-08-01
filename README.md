@@ -12,7 +12,8 @@ The project is intended for a dedicated, bootloader-unlocked, Magisk-rooted phon
 
 The engineering plan is the authoritative procedure:
 
-- [Action plan](Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md)
+- [AI agent runbook](AI_AGENT_RUNBOOK.md) - execution order, exact commands, and every trap already hit on real hardware. Start here if you are an AI assistant, or if you want the short path.
+- [Action plan](Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md) - policy, reasoning, and acceptance gates
 - [Separated companion scripts](Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/)
 - [Companion integrity manifest](Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/SHA256SUMS)
 
@@ -58,6 +59,7 @@ This project does not guarantee Google Photos entitlement, account behavior, ind
 ## Repository layout
 
 ```text
+AI_AGENT_RUNBOOK.md
 Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md
 Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/
   source-lock.env

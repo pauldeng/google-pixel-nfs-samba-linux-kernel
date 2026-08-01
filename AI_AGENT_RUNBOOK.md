@@ -1,0 +1,216 @@
+# AI agent runbook
+
+**Audience: an AI agent (Claude, Codex, or similar) driving this project for a user.**
+
+The action plan states policy and reasoning. This file is the execution order, the exact commands, and every trap that has already cost real time on real hardware. Read section 1 before running anything; each trap below was hit for the first time on 2026-08-01/02 and cost between ten minutes and two hours.
+
+Everything here was executed against a real device: Pixel (`sailfish`), Android 10 `QP1A.191005.007.A3`, bootloader `8996-012001-1908071822`, Magisk 29.0, QNAP NAS over SMB 3.0.
+
+## 1. Rules for interacting with the user
+
+**Assume the user will not infer anything.** State exactly which button, exactly when, or state explicitly that they must not touch the device.
+
+| Situation | What to tell the user |
+|---|---|
+| Any script is running | "Do not press anything. The script reboots the phone itself." |
+| A run failed and left the phone at the bootloader screen | "Press the power button to select Start." Say it in those words. |
+| Phone hangs on the Google logo over ~60 s | "Hold Power + Volume-Down until it restarts." |
+| `sudo` is needed | They must run it in a **real terminal**. `sudo` has no TTY inside the agent harness *or* behind the `!` prefix. |
+| A step needs the phone in Android | Say so. `device-deploy.sh flash` starts with an ADB check and fails if the phone is sitting in fastboot. |
+| Waiting on a long build | Say roughly how long (~35 min on 4 cores) so they do not interrupt it. |
+
+Never type a flash or rollback token on the user's behalf without them explicitly authorising that specific action. Tokens are printed by the scripts; do not invent them.
+
+**Expect permission prompts to block SELinux work.** `magiskpolicy` and `install-sepolicy-module.sh` are commonly denied by the harness classifier. Do not work around it. Explain what the command does and give the user a `!` one-liner to run themselves.
+
+## 2. Traps, by phase
+
+Symptoms an agent will actually see, and what they mean.
+
+| Symptom | Cause | Action |
+|---|---|---|
+| `sudo: a terminal is required to read the password` | No TTY in the harness or behind `!` | Install Google platform-tools to `~/.local/bin` without sudo (§3). Only udev rules need sudo. |
+| Build exits ~0 but produced nothing | Backgrounded with `nohup`/`setsid`, then reaped | Use the harness's own background mode |
+| `file not recognized: File truncated`, `fixdep: error opening depfile`, duplicate `CC` lines | Two builds raced, or a killed build left truncated objects | Rerun incrementally; if it repeats, `--clean-build` |
+| Build failed but the log shows no `error:` | The command piped output through `tail`, discarding the failure | Never pipe a build through `tail`. Capture the whole log. |
+| `kernel_release=3.18.137-nas1+` | `setlocalversion` adds `+` in a detached worktree | Expected. Match on the `-nas1` substring, not equality. |
+| `grep want_initramfs <boot partition>` returns 0 | The kernel inside boot.img is LZ4-compressed | Must `magiskboot unpack` first, then grep the extracted `kernel` |
+| `fastboot boot` → `FAILED (remote: 'dtb not found')` | This bootloader cannot RAM-boot an appended-DTB image. Reproduced on fastboot 28.0.2, 29.0.5, 31.0.3, 37.0.1, and with an image byte-identical to the working `boot_b`. | Unfixable. Skip the temporary test; flash with `--confirm-untested` (§7) |
+| `ERROR: invalid Fastboot boot partition size: <tab>0x2000000` | Fixed in `49da559`; fastboot pads with a tab | Update the repo if you see this |
+| Boot shows "There's an internal problem with your device" | AOSP's `compatibility_matrix.2.xml` requires `CONFIG_NFS_FS=n`; enabling NFS fails VINTF | Cosmetic, once per boot. Dismiss. Do **not** disable NFS. See plan 4.1.1 |
+| `test-nas-mount.sh` reports failure but the mount is actually up | Fixed in `0e269aa`; it used `adb pull` on a root-owned `0600` log | Update the repo if you see this |
+| Mount reads `Host is down`, `/proc/mounts` still lists it, `CIFS VFS: Error -13 creating socket` every 3 s | `cifsd` denied `net_raw`, cannot rebuild its socket after the session drops | **Blocking for unattended use.** Install the sepolicy module (§9) |
+| sepolicy module installed but denials continue after one reboot | `/data` is FBE; Magisk stages module rules for the *next* boot | Reboot a second time before judging. See plan 9.8 |
+| Google Photos never lists the `NAS-Inbox` device folder | Photos 7.85 does not surface it even with correct MediaStore bucket metadata | Enable **Back up all device folders**. Uploads work regardless. |
+
+## 3. Phase 1 — host
+
+```bash
+for t in adb fastboot; do command -v $t; done
+```
+
+If missing, do **not** rely on `setup-host-ubuntu-20.04.sh` alone — its `apt-get` needs sudo, which will fail in the harness. Install without sudo:
+
+```bash
+cd ~ && mkdir -p .platform-tools-dl && cd .platform-tools-dl
+curl -fsSL -o pt.zip https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+unzip -q pt.zip
+mkdir -p ~/.local/bin
+mv platform-tools ~/.local/share-platform-tools
+ln -sf ~/.local/share-platform-tools/adb ~/.local/bin/adb
+ln -sf ~/.local/share-platform-tools/fastboot ~/.local/bin/fastboot
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+This is also *better* than the apt route: Ubuntu 20.04 ships adb 1:8.1.0 (2018-era), which is a poor choice for flashing a Pixel.
+
+**Only if `adb devices` reports `no permissions`**, ask the user to run in a real terminal:
+
+```text
+sudo apt-get install --no-install-recommends android-sdk-platform-tools-common
+```
+
+Never suggest `sudo adb`.
+
+## 4. Phase 2 — build
+
+```bash
+cd ~/pixel-nas-kernel-work/Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts
+./build-kernel.sh --workspace "$HOME/pixel-nas-build-workspace" --jobs "$(nproc)"
+```
+
+Run it in the harness's background mode, never `nohup ... &`. Tell the user ~35 minutes on 4 cores. Do not pipe through `tail`.
+
+Success looks like:
+
+```text
+kernel_release=3.18.137-nas1+
+Image  Image.lz4-dtb  kernel.config  defconfig  source-lock.env  build-manifest.txt  SHA256SUMS
+```
+
+## 5. Phase 3 — verify the phone
+
+Tell the user: plug in the phone, unlock the screen, approve the RSA prompt if it appears.
+
+```bash
+adb devices
+adb shell getprop ro.product.device      # marlin or sailfish
+adb shell getprop ro.build.id            # must be exactly QP1A.191005.007.A3
+adb shell getprop ro.boot.slot_suffix
+adb shell su -c id                       # uid=0(root)
+adb shell su -c 'ls -l /data/adb/magisk/magiskboot'
+```
+
+Then the gate that decides whether packaging can run at all. **Do not grep the raw partition** — the kernel is LZ4-compressed and you will get a false zero:
+
+```bash
+adb shell "su -c 'set -e
+W=/data/local/tmp/precheck; rm -rf \$W; mkdir -p \$W; cd \$W
+SLOT=\$(getprop ro.boot.slot_suffix)
+dd if=/dev/block/bootdevice/by-name/boot\$SLOT of=boot.img bs=4096 2>/dev/null
+/data/adb/magisk/magiskboot unpack boot.img
+echo -n \"want_initramfs: \"; grep -ac want_initramfs kernel
+echo -n \"skip_initramfs: \"; grep -ac skip_initramfs kernel
+cd /; rm -rf \$W'"
+```
+
+Required: `want_initramfs: 1`, `skip_initramfs: 0`. Anything else means the phone is not in the Magisk-patched state `device-package.sh` requires, and it will refuse.
+
+## 6. Phase 4 — package
+
+```bash
+./device-deploy.sh prepare --workspace "$HOME/pixel-nas-build-workspace" --device auto
+```
+
+Reads only. Tell the user not to press anything.
+
+It prints a **rollback token and command — have the user record them off the machine** (phone photo, paper). On this hardware the no-op repack came back byte-identical to the original boot image, which is a stronger result than the script requires.
+
+## 7. Phase 5 — flash
+
+`fastboot boot` does not work on this bootloader, so the reversible test is impossible. `test` will fail; that is expected and is not a defect in the image.
+
+Phone must be **in Android**, not the bootloader. Tell the user: *do not press anything, the script reboots the phone itself.*
+
+```bash
+./device-deploy.sh flash --workspace "$HOME/pixel-nas-build-workspace" \
+  --device <device> --data-backup-confirmed \
+  --confirm-flash 'FLASH:<device>:<slot>:<hash>' \
+  --confirm-untested 'UNTESTED:<device>:<slot>:<hash>'
+```
+
+Both tokens come from the scripts. The untested path re-verifies the rollback image against the live partition before writing and prints the recovery command on any failure.
+
+Verify: `uname -r` contains `-nas1`, root still works, `nfs` and `cifs` in `/proc/filesystems`.
+
+## 8. Phase 6 — NAS discovery
+
+Do this from the Ubuntu host before touching the phone. No credentials needed for protocol probing.
+
+Check ports 445, 139, 111, 2049. If `smbclient` is absent and sudo is unavailable, probe SMB dialects with a raw `python3` socket — the decisive question is whether the server accepts **SMB 3.0**, since this kernel maxes at 3.02 and has no transport encryption.
+
+For NFS, query mountd's real TCP port from portmapper, not 2049. An empty export list with `accept_stat=0` means genuinely no exports configured.
+
+With `smbclient`, keep credentials out of `ps` by using an auth file:
+
+```bash
+umask 077; printf 'username = %s\npassword = %s\n' USER PASS > auth
+smbclient -L //NAS -A auth
+```
+
+**Share enumeration is not access.** Test each share with `-c ls` and confirm denials on the ones that should be denied. Test write refusal explicitly with `put`.
+
+## 9. Phase 7 — mount, and the rule that makes it usable
+
+Config lives outside the integrity-covered directory:
+
+```bash
+mkdir -p ../pixel-nas-operator-config
+cp nas-mount-smb-ro.conf.example ../pixel-nas-operator-config/nas-mount.conf
+chmod 0600 ../pixel-nas-operator-config/nas-mount.conf
+```
+
+Set `NAS_HOST` (numeric IPv4 only — this CIFS client cannot resolve names), `SMB_SHARE`, `SMB_USER`, and optionally `SMB_PREFIX_PATH` to narrow the mount to one directory below the share. Prefer the narrow mount.
+
+```bash
+./test-nas-mount.sh ../pixel-nas-operator-config/nas-mount.conf \
+                    ../pixel-nas-operator-config/nas-smb.secret
+```
+
+**Then install the SELinux module before the persistent service.** Without it the mount dies on the first doze cycle and never recovers.
+
+Expect the harness to block this. Give the user:
+
+```text
+! cd ~/pixel-nas-kernel-work/Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts && ./install-sepolicy-module.sh
+```
+
+Then `./install-nas-service.sh <conf> <secret>`, and **reboot twice** — on FBE the rule only takes effect on the second boot. Judging after one reboot will make a working module look broken.
+
+Acceptance, both zero across a deliberate Wi-Fi teardown:
+
+```bash
+adb shell "su -c 'dmesg | grep -c \"denied { net_raw }\"'"
+adb shell "su -c 'dmesg | grep -c \"Error -13 creating socket\"'"
+```
+
+Retire any other CIFS module: `touch /data/adb/modules/<id>/remove`, then reboot.
+
+## 10. Phase 8 — Google Photos
+
+```bash
+adb shell "su -mm -c '/data/local/tmp/stage-photos.sh /data/local/tmp/nas-ro \
+  /storage/emulated/0/DCIM/NAS-Inbox /data/local/tmp/photos-manifest.txt'"
+adb shell "content query --uri content://media/external/images/media \
+  --projection _id:_data:bucket_display_name --where \"_data LIKE '%NAS-Inbox%'\""
+```
+
+Tell the user, in these words: **profile picture (top right) → Photos settings → Backup → Back up device folders**.
+
+`NAS-Inbox` will probably **not** appear in that list, even with correct `bucket_display_name` and `is_pending=0`. Have them enable **Back up all device folders** instead; uploads then work. Confirm the result is **original quality** — that is the entire premise of using this phone, and only a real upload proves it.
+
+## 11. State reached on 2026-08-02
+
+Working and persistent across reboots: custom kernel `3.18.137-nas1+` with Magisk root; QNAP subdirectory mounted read-only over SMB 3.0, auto-mounting ~55 s after boot and surviving Wi-Fi teardown; one photo uploaded to Google Photos at original quality.
+
+Not yet proven: rollback (image verified and preserved, never exercised); boot with the NAS powered off; NFSv3 against a real export; the experimental direct-mount into shared storage; long-term Doze behaviour.
