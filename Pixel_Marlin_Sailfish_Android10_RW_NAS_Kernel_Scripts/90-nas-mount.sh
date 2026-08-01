@@ -173,16 +173,18 @@ if find "$TARGET" -mindepth 1 -maxdepth 1 | grep -q .; then
   fail "refusing to hide non-empty target"
 fi
 
-elapsed=0
 if [ "$PROTOCOL" = smb ]; then
   service_port=445
 else
   service_port=2049
 fi
+# Bound by wall clock, not by counting sleeps. Each failed probe also burns the
+# `nc -w 2` connection timeout, so counting only the sleeps made every wait run
+# for roughly twice WAIT_SECONDS: a measured 2m06s against a configured 60.
+deadline=$(($(date +%s) + WAIT_SECONDS))
 while ! /system/bin/toybox nc -4 -w 2 -q 1 "$NAS_HOST" "$service_port" </dev/null >/dev/null 2>&1; do
-  [ "$elapsed" -lt "$WAIT_SECONDS" ] || fail "$PROTOCOL TCP port $service_port did not become reachable within $WAIT_SECONDS seconds"
+  [ "$(date +%s)" -lt "$deadline" ] || fail "$PROTOCOL TCP port $service_port did not become reachable within $WAIT_SECONDS seconds"
   sleep 2
-  elapsed=$((elapsed + 2))
 done
 log "$PROTOCOL TCP port $service_port is reachable"
 

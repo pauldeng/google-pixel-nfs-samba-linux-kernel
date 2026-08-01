@@ -20,7 +20,8 @@ Validated on hardware 2026-08-02 (Pixel / sailfish):
 - custom kernel flashed to the active slot; `uname -r` reports `3.18.137-nas1+` with Magisk root intact;
 - QNAP `Multimedia/Photo/...` mounted read-only over SMB 3.0 at a root-only path, reads byte-identical to the NAS copy, writes refused;
 - mount returns automatically about 55 seconds after boot and survives a full Wi-Fi teardown;
-- a staged photo reached Google Photos at original quality.
+- a staged photo reached Google Photos at original quality;
+- boot with the NAS powered off: boot completed in 30 s, the service failed cleanly inside its bounded wait, left no mount and no retry loop, and the phone was fully usable.
 
 Established as unsupported (a proven negative, not a gap): `fastboot boot` is refused for every image on bootloader 8996-012001-1908071822, verified across four Fastboot releases. See 8.3.1.
 
@@ -29,6 +30,6 @@ Still unvalidated. These are open items, not mandatory gates for the parts alrea
 - rollback (the image is verified and preserved but has not been exercised);
 - NFSv3 against a real export;
 - the experimental direct-mount-into-shared-storage path;
-- boot with the NAS powered off, and overnight Doze behaviour.
+- overnight Doze behaviour.
 
 Each remains a gate for the specific capability it covers: do not rely on rollback, NFSv3, the direct shared-storage mount, or unattended NAS-off operation until the matching item is exercised.
