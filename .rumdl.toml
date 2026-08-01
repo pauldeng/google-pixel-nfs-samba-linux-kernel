@@ -1,0 +1,10 @@
+line-length = 160
+flavor = "gfm"
+respect-gitignore = true
+cache-dir = ".tools/cache/rumdl"
+# Technical evidence tables, immutable hashes, and source URLs are intentionally
+# not hard-wrapped. All other default lint rules remain enabled.
+disable = ["MD013"]
+
+[per-file-ignores]
+"Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Action_Plan.md" = ["MD025"]

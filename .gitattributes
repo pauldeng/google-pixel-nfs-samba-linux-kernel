@@ -1,1 +1,37 @@
-.png binary
+# Let Git detect text by default, then keep all project-authored text files on
+# LF so scripts copied to Android and Ubuntu remain executable without CRLF
+# interpreter or parsing failures.
+* text=auto
+
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.editorconfig text eol=lf
+.rumdl.toml text eol=lf
+Makefile text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.env text eol=lf
+*.config text eol=lf
+*.conf text eol=lf
+*.example text eol=lf
+SHA256SUMS text eol=lf
+
+# Images, archives, boot images, kernels, device trees, and compressed build
+# products must never undergo text conversion or textual merge handling.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.img binary
+*.dtb binary
+*.lz4 binary
+*.gz binary
+*.xz binary
+Image binary
+Image.* binary
+vmlinux binary

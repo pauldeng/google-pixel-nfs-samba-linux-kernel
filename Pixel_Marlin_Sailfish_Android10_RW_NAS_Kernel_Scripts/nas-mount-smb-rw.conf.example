@@ -1,0 +1,10 @@
+PROTOCOL=smb
+NAS_HOST=192.168.1.20
+SMB_SHARE=pixel-phone-stage
+SMB_USER=pixel_nas_writer
+SMB_SECRET=/data/adb/nas-smb.secret
+TARGET=/data/local/tmp/nas-rw
+MOUNT_MODE=rw
+SELINUX_CONTEXT=
+REQUIRE_WRITE_TEST=1
+WAIT_SECONDS=60

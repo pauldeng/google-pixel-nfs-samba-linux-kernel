@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=source-lock.env
+. "$SCRIPT_DIR/source-lock.env"
+# shellcheck source=host-shell-lib.sh
+. "$SCRIPT_DIR/host-shell-lib.sh"
+
+action=${1:-}
+[[ -n $action ]] || {
+  echo "Usage: $0 prepare|test|flash|rollback [options]" >&2
+  exit 2
+}
+shift
+workspace="${PWD}/pixel-nas-kernel-workspace"
+expected_device=auto
+requested_slot=""
+requested_serial=""
+confirm_flash=""
+confirm_rollback=""
+data_backup_confirmed=0
+while (($#)); do
+  case "$1" in
+    --workspace)
+      workspace=$2
+      shift 2
+      ;;
+    --device)
+      expected_device=$2
+      shift 2
+      ;;
+    --slot)
+      requested_slot=${2#_}
+      shift 2
+      ;;
+    --serial)
+      requested_serial=$2
+      shift 2
+      ;;
+    --confirm-flash)
+      confirm_flash=$2
+      shift 2
+      ;;
+    --confirm-rollback)
+      confirm_rollback=$2
+      shift 2
+      ;;
+    --data-backup-confirmed)
+      data_backup_confirmed=1
+      shift
+      ;;
+    *)
+      echo "ERROR: unknown option: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+workspace=$(realpath -m -- "$workspace")
+artifacts="$workspace/artifacts/common"
+
+adb_serial() {
+  local devices
+  mapfile -t devices < <(adb devices | awk '$2=="device" {print $1}')
+  ((${#devices[@]} == 1)) || {
+    echo "ERROR: exactly one authorised ADB device is required" >&2
+    exit 1
+  }
+  printf '%s\n' "${devices[0]}"
+}
+adb_prop() { adb -s "$serial" shell getprop "$1" | tr -d '\r'; }
+root_cmd() {
+  local command_arg
+  command_arg=$(quote_remote_command "$1")
+  adb -s "$serial" shell "su -c $command_arg"
+}
+wait_adb() {
+  adb -s "$serial" wait-for-device
+  local count=0
+  until [[ $(adb_prop sys.boot_completed) == 1 ]]; do
+    ((count++ < 180)) || {
+      echo "ERROR: Android did not complete boot" >&2
+      exit 1
+    }
+    sleep 1
+  done
+}
+capture_adb_state() {
+  serial=$(adb_serial)
+  [[ $serial =~ ^[A-Za-z0-9._:-]+$ ]] || {
+    echo "ERROR: unsafe ADB serial value" >&2
+    exit 1
+  }
+  device=$(adb_prop ro.product.device)
+  build=$(adb_prop ro.build.id)
+  version=$(adb_prop ro.build.version.release)
+  slot=$(adb_prop ro.boot.slot_suffix)
+  slot=${slot#_}
+  [[ $device == marlin || $device == sailfish ]] || {
+    echo "ERROR: unsupported device: $device" >&2
+    exit 1
+  }
+  [[ $expected_device == auto || $expected_device == "$device" ]] || {
+    echo "ERROR: device mismatch" >&2
+    exit 1
+  }
+  [[ $build == "$ANDROID_BUILD" && $version == "$ANDROID_VERSION" ]] || {
+    echo "ERROR: Android build/version mismatch" >&2
+    exit 1
+  }
+  [[ $slot == a || $slot == b ]] || {
+    echo "ERROR: invalid slot: $slot" >&2
+    exit 1
+  }
+  [[ $(root_cmd id) == *'uid=0(root)'* ]] || {
+    echo "ERROR: Magisk root is required" >&2
+    exit 1
+  }
+  state_dir="$workspace/deploy/${device}-${build}-${serial}/slot-$slot"
+}
+wait_fastboot() {
+  local count=0
+  until fastboot -s "$serial" devices | grep -q "^${serial}[[:space:]]"; do
+    ((count++ < 60)) || {
+      echo "ERROR: Fastboot device did not appear" >&2
+      exit 1
+    }
+    sleep 1
+  done
+}
+fastboot_value() {
+  fastboot -s "$serial" getvar "$1" 2>&1 | sed -n "s/.*$1: *//p" | tail -n 1 | tr -d '\r'
+}
+check_fastboot_state() {
+  local require_recorded_slot=${1:-1}
+  wait_fastboot
+  [[ $(fastboot_value product) == "$device" ]] || {
+    echo "ERROR: Fastboot product mismatch" >&2
+    exit 1
+  }
+  if ((require_recorded_slot)); then
+    [[ $(fastboot_value current-slot) == "$slot" ]] || {
+      echo "ERROR: Fastboot slot mismatch" >&2
+      exit 1
+    }
+  fi
+  [[ $(fastboot_value unlocked) == yes ]] || {
+    echo "ERROR: bootloader is not unlocked" >&2
+    exit 1
+  }
+}
+check_partition_size() {
+  local image=$1 raw size image_size
+  raw=$(fastboot_value "partition-size:boot_$slot")
+  [[ $raw =~ ^0[xX][0-9a-fA-F]+$ || $raw =~ ^[0-9]+$ ]] || {
+    echo "ERROR: invalid Fastboot boot partition size: $raw" >&2
+    exit 1
+  }
+  size=$((raw))
+  image_size=$(stat -c %s "$image")
+  ((image_size <= size)) || {
+    echo "ERROR: image exceeds boot_$slot ($image_size > $size)" >&2
+    exit 1
+  }
+}
+
+case "$action" in
+  prepare)
+    capture_adb_state
+    mkdir -p "$state_dir"
+    [[ -f $artifacts/Image && -f $artifacts/SHA256SUMS ]] || {
+      echo "ERROR: build artifacts are incomplete" >&2
+      exit 1
+    }
+    (cd "$artifacts" && sha256sum -c SHA256SUMS)
+    block="/dev/block/bootdevice/by-name/boot_$slot"
+    remote_base="/data/local/tmp/pixel-nas-base-$$.img"
+    remote_image="/data/local/tmp/pixel-nas-Image-$$"
+    remote_noop="/data/local/tmp/pixel-nas-noop-$$.img"
+    remote_custom="/data/local/tmp/pixel-nas-custom-$$.img"
+    cleanup_prepare_remote() {
+      root_cmd "rm -f $remote_base $remote_image $remote_noop $remote_custom /data/local/tmp/pixel-nas-device-package.sh" >/dev/null 2>&1 || true
+    }
+    trap cleanup_prepare_remote EXIT INT TERM
+    root_cmd "dd if=$block of=$remote_base bs=4096"
+    if [[ -f $state_dir/original-boot.img ]]; then
+      [[ -f $state_dir/original-boot.img.sha256 ]] || {
+        echo "ERROR: existing backup lacks its checksum" >&2
+        exit 1
+      }
+      (cd "$state_dir" && sha256sum -c original-boot.img.sha256)
+      recorded_sha=$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')
+      live_sha=$(root_cmd "sha256sum $remote_base" | awk '{print $1}')
+      [[ $live_sha == "$recorded_sha" ]] || {
+        echo "ERROR: live boot_$slot differs from the immutable backup; preserve this state and prepare in a new workspace" >&2
+        exit 1
+      }
+    else
+      adb -s "$serial" pull "$remote_base" "$state_dir/original-boot.img"
+      (cd "$state_dir" && sha256sum original-boot.img >original-boot.img.sha256)
+    fi
+    boot_size=$(root_cmd "blockdev --getsize64 $block" | tr -d '\r')
+    adb -s "$serial" push "$artifacts/Image" "$remote_image"
+    adb -s "$serial" push "$SCRIPT_DIR/device-package.sh" /data/local/tmp/pixel-nas-device-package.sh
+    root_cmd "chmod 0755 /data/local/tmp/pixel-nas-device-package.sh && /data/local/tmp/pixel-nas-device-package.sh $remote_base $remote_image $remote_noop $remote_custom" | tee "$state_dir/package.log"
+    adb -s "$serial" pull "$remote_noop" "$state_dir/noop-boot.img"
+    adb -s "$serial" pull "$remote_custom" "$state_dir/custom-boot.img"
+    root_cmd "rm -f $remote_base $remote_image $remote_noop $remote_custom /data/local/tmp/pixel-nas-device-package.sh"
+    trap - EXIT INT TERM
+    custom_size=$(stat -c %s "$state_dir/custom-boot.img")
+    ((custom_size <= boot_size)) || {
+      echo "ERROR: custom image exceeds boot partition" >&2
+      exit 1
+    }
+    (cd "$state_dir" && sha256sum noop-boot.img custom-boot.img >packaged-images.sha256)
+    original_uname=$(adb -s "$serial" shell uname -r | tr -d '\r')
+    fingerprint=$(adb_prop ro.build.fingerprint)
+    {
+      printf 'device=%q\n' "$device"
+      printf 'build=%q\n' "$build"
+      printf 'serial=%q\n' "$serial"
+      printf 'slot=%q\n' "$slot"
+      printf 'boot_partition_size=%q\n' "$boot_size"
+      printf 'original_uname=%q\n' "$original_uname"
+      printf 'fingerprint=%q\n' "$fingerprint"
+    } >"$state_dir/deploy-state.env"
+    custom_sha=$(sha256sum "$state_dir/custom-boot.img" | awk '{print $1}')
+    rollback_token="ROLLBACK:$device:$slot:$(sha256sum "$state_dir/original-boot.img" | cut -c1-12)"
+    echo "Prepared: $state_dir"
+    printf 'Test: %q test --workspace %q --device %q\n' "$0" "$workspace" "$device"
+    echo "Future flash token: FLASH:$device:$slot:${custom_sha:0:12}"
+    echo "Rollback token: $rollback_token"
+    printf 'Boot-loop rollback: %q rollback --workspace %q --device %q --slot %q --serial %q --confirm-rollback %q\n' \
+      "$0" "$workspace" "$device" "$slot" "$serial" "$rollback_token"
+    ;;
+  test)
+    capture_adb_state
+    [[ -f $state_dir/deploy-state.env && -f $state_dir/noop-boot.img && -f $state_dir/custom-boot.img ]] || {
+      echo "ERROR: run prepare first" >&2
+      exit 1
+    }
+    (cd "$state_dir" && sha256sum -c packaged-images.sha256)
+    adb -s "$serial" reboot bootloader
+    check_fastboot_state
+    fastboot -s "$serial" boot "$state_dir/noop-boot.img"
+    wait_adb
+    [[ $(root_cmd id) == *'uid=0(root)'* ]] || {
+      echo "ERROR: root failed after no-op repack" >&2
+      exit 1
+    }
+    adb -s "$serial" reboot bootloader
+    check_fastboot_state
+    fastboot -s "$serial" boot "$state_dir/custom-boot.img"
+    wait_adb
+    [[ $(root_cmd id) == *'uid=0(root)'* ]] || {
+      echo "ERROR: root failed after custom temporary boot" >&2
+      exit 1
+    }
+    runtime_release=$(adb -s "$serial" shell uname -r | tr -d '\r')
+    [[ $runtime_release == *-nas1* ]] || {
+      echo "ERROR: custom kernel identity is absent: $runtime_release" >&2
+      exit 1
+    }
+    root_cmd "cat /proc/filesystems" | grep -Eq '(^|[[:space:]])nfs$' || {
+      echo "ERROR: NFS is not registered" >&2
+      exit 1
+    }
+    root_cmd "cat /proc/filesystems" | grep -Eq '(^|[[:space:]])cifs$' || {
+      echo "ERROR: CIFS is not registered" >&2
+      exit 1
+    }
+    custom_sha=$(sha256sum "$state_dir/custom-boot.img" | awk '{print $1}')
+    printf 'custom_boot_sha=%q\nruntime_release=%q\ntested_utc=%q\n' "$custom_sha" "$runtime_release" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$state_dir/test-success.env"
+    echo "Temporary boot passed, including no-op repack and Magisk root survival"
+    ;;
+  flash)
+    ((data_backup_confirmed)) || {
+      echo "ERROR: --data-backup-confirmed is required" >&2
+      exit 1
+    }
+    capture_adb_state
+    [[ -f $state_dir/test-success.env ]] || {
+      echo "ERROR: matching temporary-test evidence is absent" >&2
+      exit 1
+    }
+    custom_boot_sha=""
+    # shellcheck source=/dev/null
+    . "$state_dir/test-success.env"
+    [[ -n $custom_boot_sha ]] || {
+      echo "ERROR: temporary-test evidence lacks custom_boot_sha" >&2
+      exit 1
+    }
+    current_sha=$(sha256sum "$state_dir/custom-boot.img" | awk '{print $1}')
+    [[ $current_sha == "$custom_boot_sha" ]] || {
+      echo "ERROR: tested image checksum changed" >&2
+      exit 1
+    }
+    expected="FLASH:$device:$slot:${current_sha:0:12}"
+    [[ $confirm_flash == "$expected" ]] || {
+      echo "ERROR: exact flash token required: $expected" >&2
+      exit 1
+    }
+    adb -s "$serial" reboot bootloader
+    check_fastboot_state
+    check_partition_size "$state_dir/custom-boot.img"
+    fastboot -s "$serial" flash "boot_$slot" "$state_dir/custom-boot.img"
+    fastboot -s "$serial" reboot
+    wait_adb
+    [[ $(adb -s "$serial" shell uname -r | tr -d '\r') == *-nas1* ]] || {
+      echo "ERROR: persistent custom kernel verification failed" >&2
+      exit 1
+    }
+    [[ $(root_cmd id) == *'uid=0(root)'* ]] || {
+      echo "ERROR: persistent Magisk root verification failed" >&2
+      exit 1
+    }
+    echo "Persistent one-slot flash verified"
+    ;;
+  rollback)
+    [[ $expected_device == marlin || $expected_device == sailfish ]] || {
+      echo "ERROR: rollback requires --device marlin|sailfish" >&2
+      exit 1
+    }
+    [[ $requested_slot == a || $requested_slot == b ]] || {
+      echo "ERROR: rollback requires --slot a|b" >&2
+      exit 1
+    }
+    [[ -n $requested_serial ]] || {
+      echo "ERROR: rollback requires --serial" >&2
+      exit 1
+    }
+    [[ $requested_serial =~ ^[A-Za-z0-9._:-]+$ ]] || {
+      echo "ERROR: unsafe rollback serial value" >&2
+      exit 1
+    }
+    device=$expected_device
+    slot=$requested_slot
+    serial=$requested_serial
+    state_dir="$workspace/deploy/${device}-${ANDROID_BUILD}-${serial}/slot-$slot"
+    [[ -f $state_dir/original-boot.img && -f $state_dir/original-boot.img.sha256 ]] || {
+      echo "ERROR: rollback package is incomplete" >&2
+      exit 1
+    }
+    (cd "$state_dir" && sha256sum -c original-boot.img.sha256)
+    original_sha=$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')
+    expected="ROLLBACK:$device:$slot:${original_sha:0:12}"
+    [[ $confirm_rollback == "$expected" ]] || {
+      echo "ERROR: exact rollback token required: $expected" >&2
+      exit 1
+    }
+    check_fastboot_state 0
+    check_partition_size "$state_dir/original-boot.img"
+    fastboot -s "$serial" flash "boot_$slot" "$state_dir/original-boot.img"
+    fastboot -s "$serial" reboot
+    echo "Rollback image restored to boot_$slot"
+    ;;
+  *)
+    echo "ERROR: unknown action: $action" >&2
+    exit 2
+    ;;
+esac

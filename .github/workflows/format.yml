@@ -1,0 +1,36 @@
+name: Quality
+
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+      - "**/*.sh"
+      - ".editorconfig"
+      - ".rumdl.toml"
+      - "Makefile"
+      - "tools/install-rumdl.sh"
+      - "tools/install-shellcheck.sh"
+      - "tools/install-shfmt.sh"
+      - ".github/workflows/format.yml"
+  push:
+    paths:
+      - "**/*.md"
+      - "**/*.sh"
+      - ".editorconfig"
+      - ".rumdl.toml"
+      - "Makefile"
+      - "tools/install-rumdl.sh"
+      - "tools/install-shellcheck.sh"
+      - "tools/install-shfmt.sh"
+      - ".github/workflows/format.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  formatting:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run formatting, static analysis, regressions, and integrity checks
+        run: make check

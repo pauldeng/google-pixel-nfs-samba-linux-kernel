@@ -1,0 +1,33 @@
+# Local Android kernel and toolchain checkouts. These are validated inputs, not
+# vendored project content.
+/android-kernel-msm/
+/aarch64-linux-android-4.9/
+/arm-linux-androideabi-4.9/
+
+# Script-managed workspaces and generated build/deployment state.
+/pixel-nas-kernel-workspace/
+/pixel-nas-build-workspace/
+/repos/
+/worktrees/
+/out/
+/artifacts/
+/deploy/
+/.tools/
+
+# Operator-local NAS configuration, credentials, and test evidence.
+/pixel-nas-operator-config/
+**/nas-mount.conf
+**/nas-smb.secret
+**/pixel-nas-mount-test-*.log
+
+# Optional transport bundle generated from the integrity-covered directory.
+/Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts.zip
+
+# Common editor and operating-system files.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

@@ -1,0 +1,10 @@
+PROTOCOL=smb
+NAS_HOST=192.168.1.20
+SMB_SHARE=pixel-photo-source
+SMB_USER=pixel_nas_reader
+SMB_SECRET=/data/adb/nas-smb.secret
+TARGET=/data/local/tmp/nas-ro
+MOUNT_MODE=ro
+SELINUX_CONTEXT=
+REQUIRE_WRITE_TEST=0
+WAIT_SECONDS=60

@@ -1,0 +1,8 @@
+PROTOCOL=nfs
+NAS_HOST=192.168.1.20
+NFS_EXPORT=/volume1/pixel-phone-stage
+TARGET=/data/local/tmp/nas-rw
+MOUNT_MODE=rw
+SELINUX_CONTEXT=
+REQUIRE_WRITE_TEST=1
+WAIT_SECONDS=60

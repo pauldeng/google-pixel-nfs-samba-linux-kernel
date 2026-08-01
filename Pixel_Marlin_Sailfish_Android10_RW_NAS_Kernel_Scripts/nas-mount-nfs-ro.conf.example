@@ -1,0 +1,8 @@
+PROTOCOL=nfs
+NAS_HOST=192.168.1.20
+NFS_EXPORT=/volume1/pixel-photo-source
+TARGET=/data/local/tmp/nas-ro
+MOUNT_MODE=ro
+SELINUX_CONTEXT=
+REQUIRE_WRITE_TEST=0
+WAIT_SECONDS=60
