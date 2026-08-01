@@ -19,6 +19,7 @@ requested_slot=""
 requested_serial=""
 confirm_flash=""
 confirm_rollback=""
+confirm_untested=""
 data_backup_confirmed=0
 while (($#)); do
   case "$1" in
@@ -44,6 +45,10 @@ while (($#)); do
       ;;
     --confirm-rollback)
       confirm_rollback=$2
+      shift 2
+      ;;
+    --confirm-untested)
+      confirm_untested=$2
       shift 2
       ;;
     --data-backup-confirmed)
@@ -129,7 +134,10 @@ wait_fastboot() {
   done
 }
 fastboot_value() {
-  fastboot -s "$serial" getvar "$1" 2>&1 | sed -n "s/.*$1: *//p" | tail -n 1 | tr -d '\r'
+  # Fastboot pads some values with a tab, e.g. "partition-size:boot_b:\t 0x2000000",
+  # so strip all surrounding whitespace rather than spaces alone.
+  fastboot -s "$serial" getvar "$1" 2>&1 | sed -n "s/.*$1://p" | tail -n 1 \
+    | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
 check_fastboot_state() {
   local require_recorded_slot=${1:-1}
@@ -279,27 +287,78 @@ case "$action" in
       exit 1
     }
     capture_adb_state
-    [[ -f $state_dir/test-success.env ]] || {
-      echo "ERROR: matching temporary-test evidence is absent" >&2
-      exit 1
-    }
-    custom_boot_sha=""
-    # shellcheck source=/dev/null
-    . "$state_dir/test-success.env"
-    [[ -n $custom_boot_sha ]] || {
-      echo "ERROR: temporary-test evidence lacks custom_boot_sha" >&2
-      exit 1
-    }
     current_sha=$(sha256sum "$state_dir/custom-boot.img" | awk '{print $1}')
-    [[ $current_sha == "$custom_boot_sha" ]] || {
-      echo "ERROR: tested image checksum changed" >&2
-      exit 1
-    }
+    if [[ -f $state_dir/test-success.env ]]; then
+      # Normal path: a reversible temporary boot proved this exact image.
+      [[ -z $confirm_untested ]] || {
+        echo "ERROR: --confirm-untested is not permitted once temporary-test evidence exists" >&2
+        exit 1
+      }
+      custom_boot_sha=""
+      # shellcheck source=/dev/null
+      . "$state_dir/test-success.env"
+      [[ -n $custom_boot_sha ]] || {
+        echo "ERROR: temporary-test evidence lacks custom_boot_sha" >&2
+        exit 1
+      }
+      [[ $current_sha == "$custom_boot_sha" ]] || {
+        echo "ERROR: tested image checksum changed" >&2
+        exit 1
+      }
+    else
+      # Escape hatch for bootloaders that reject `fastboot boot`. Pixel 1
+      # (marlin/sailfish) rejects a RAM-booted appended-DTB image with
+      # "dtb not found" on every Fastboot release tested, so the reversible
+      # acceptance test cannot run at all there. Every other gate still
+      # applies; only the temporary-boot evidence is waived, and only when
+      # the operator supplies a second image-bound token.
+      expected_untested="UNTESTED:$device:$slot:${current_sha:0:12}"
+      [[ $confirm_untested == "$expected_untested" ]] || {
+        echo "ERROR: temporary-test evidence is absent." >&2
+        echo "Run 'test' first. If this bootloader rejects 'fastboot boot', rerun with:" >&2
+        echo "  --confirm-untested '$expected_untested'" >&2
+        echo "Recovery then depends solely on the rollback image; confirm it is verified and its command is recorded off-host." >&2
+        exit 1
+      }
+      [[ -f $state_dir/original-boot.img && -f $state_dir/original-boot.img.sha256 ]] || {
+        echo "ERROR: refusing an untested flash without a rollback image" >&2
+        exit 1
+      }
+      (cd "$state_dir" && sha256sum -c original-boot.img.sha256) || {
+        echo "ERROR: rollback image failed verification; refusing an untested flash" >&2
+        exit 1
+      }
+      (cd "$state_dir" && sha256sum -c packaged-images.sha256) || {
+        echo "ERROR: packaged images failed verification; refusing an untested flash" >&2
+        exit 1
+      }
+      original_sha=$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')
+      live_sha=$(root_cmd "sha256sum /dev/block/bootdevice/by-name/boot_$slot" | awk '{print $1}')
+      [[ $live_sha == "$original_sha" ]] || {
+        echo "ERROR: live boot_$slot no longer matches the rollback image; refusing an untested flash" >&2
+        exit 1
+      }
+      printf 'untested_flash_utc=%q\nuntested_flash_sha=%q\nrollback_sha=%q\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$current_sha" "$original_sha" \
+        >"$state_dir/untested-flash.env"
+      echo "WARNING: flashing without temporary-boot evidence; rollback image verified against live boot_$slot"
+    fi
     expected="FLASH:$device:$slot:${current_sha:0:12}"
     [[ $confirm_flash == "$expected" ]] || {
       echo "ERROR: exact flash token required: $expected" >&2
       exit 1
     }
+    # From here the boot partition may change, so keep the exact recovery
+    # command on screen for any non-zero exit, including a failed boot.
+    rollback_sha=$(sha256sum "$state_dir/original-boot.img" | awk '{print $1}')
+    rollback_command=$(printf '%q rollback --workspace %q --device %q --slot %q --serial %q --confirm-rollback %q' \
+      "$0" "$workspace" "$device" "$slot" "$serial" "ROLLBACK:$device:$slot:${rollback_sha:0:12}")
+    # shellcheck disable=SC2064 # Expand the command now, not at trap time.
+    trap "flash_status=\$?; ((flash_status == 0)) || {
+      echo >&2
+      echo 'RECOVERY: enter Fastboot with the hardware key combination, then run:' >&2
+      echo '  $rollback_command' >&2
+    }" EXIT
     adb -s "$serial" reboot bootloader
     check_fastboot_state
     check_partition_size "$state_dir/custom-boot.img"
@@ -314,6 +373,7 @@ case "$action" in
       echo "ERROR: persistent Magisk root verification failed" >&2
       exit 1
     }
+    trap - EXIT
     echo "Persistent one-slot flash verified"
     ;;
   rollback)

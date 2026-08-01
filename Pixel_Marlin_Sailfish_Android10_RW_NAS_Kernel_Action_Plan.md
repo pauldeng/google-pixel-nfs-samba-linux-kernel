@@ -305,6 +305,29 @@ CONFIG_LOCALVERSION="-nas1"
 
 `CONFIG_CIFS_SMB311` does not exist in the locked tree and must not be asserted. `CONFIG_CIFS_SMB2=y` selects `CONFIG_FSCACHE`, `CONFIG_KEYS`, and `CONFIG_DNS_RESOLVER`; those resolved dependencies are expected. A clean detached Git worktree can produce `3.18.137-nas1+` even with `CONFIG_LOCALVERSION_AUTO=n`; acceptance therefore requires the `-nas1` marker rather than exact whole-string equality.
 
+### 4.1.1 Expected VINTF warning: AOSP requires `CONFIG_NFS_FS=n`
+
+Android's Treble vendor-interface check forbids the NFS client on this kernel series. `/system/etc/vintf/compatibility_matrix.2.xml` contains, under `<kernel version="3.18.0">`:
+
+``` xml
+<config><key>CONFIG_NFS_FS</key><value type="tristate">n</value></config>
+```
+
+Enabling `CONFIG_NFS_FS=y` therefore makes `VintfObject.verifyWithoutAvb()` return non-zero, `Build.isBuildConsistent()` return false, and `ActivityTaskManagerService` raise the one-per-boot dialog **"There's an internal problem with your device. Contact your manufacturer for details."** Observed on sailfish 2026-08-01:
+
+``` text
+E Build              : Vendor interface is incompatible, error=1
+E ActivityTaskManager: Build fingerprint is not consistent, warning user
+```
+
+**This is expected and cosmetic.** The dialog is a boot-time warning only; nothing is disabled, throttled, or blocked. On the same boot: no entries in the crash buffer, no kernel messages at levels 0-3, `fsverity_init` and `art_apex_boot_integrity` both exit 0, all build fingerprints plus bootloader and baseband match, and `nfs` and `cifs` register normally. The requirement is Treble hygiene for kernels shipping against that matrix, not a stability constraint.
+
+Dismiss it. Do **not** resolve it by disabling `CONFIG_NFS_FS`, which removes the NFS half of the project. A CIFS-only build avoids the warning if the dialog is genuinely unacceptable, at the cost of the NFSv3 fallback.
+
+> **A config fragment can violate a requirement by adding, not only by removing**
+>
+> `build-kernel.sh` asserts that each required symbol is present. It has no notion of AOSP requiring a symbol be *absent*, so a strict superset of the stock configuration can still fail VINTF. When adding future symbols, diff the resolved configuration against a stock `marlin_defconfig` build and cross-check every newly enabled symbol against the `<kernel version="3.18…">` blocks of all `/system/etc/vintf/compatibility_matrix.*.xml` files for a required `n`.
+
 ## 4.2 Why built-in instead of modules
 
 - The stock Android kernel/module packaging path is not designed like a desktop distribution.
@@ -573,6 +596,25 @@ First copy irreplaceable user data off the phone. Then use the exact token print
 ```
 
 The example token is intentionally fake. Use only the exact token emitted by your script. Immediately before flash, the script confirms the Fastboot product, serial, current slot, unlocked state, test evidence, image checksum, and boot-partition size. It writes only boot_a or boot_b for the tested current slot and leaves the other slot untouched.
+
+### 8.3.1 Bootloaders that reject `fastboot boot`
+
+Measured on 2026-08-01 against a sailfish on QP1A.191005.007.A3, bootloader `8996-012001-1908071822`: `fastboot boot` fails with `FAILED (remote: 'dtb not found')` for **any** boot image, including one byte-identical to the live `boot_b` that the same bootloader boots from flash every day. Fastboot 28.0.2, 29.0.5, 31.0.3 and 37.0.1 all behave identically, so this is the bootloader's RAM-boot path, not the host tool and not the packaged image. These devices carry their device trees appended to the kernel (`KERNEL_DTB_SZ` non-zero, `SECOND_SZ` and `EXTRA_SZ` zero); the flash-boot path scans that appended blob and the RAM-boot path does not.
+
+The reversible acceptance test therefore cannot run on such a device. `test` will fail and write no `test-success.env`, and `flash` refuses without it. Rather than bypassing the gates by hand, `flash` accepts a second image-bound token:
+
+``` bash
+./device-deploy.sh flash \
+  --workspace "$WORKSPACE" \
+  --device sailfish \
+  --data-backup-confirmed \
+  --confirm-flash 'FLASH:sailfish:b:<hash>' \
+  --confirm-untested 'UNTESTED:sailfish:b:<hash>'
+```
+
+Every other gate still applies. In addition, the untested path requires a rollback image that verifies against its recorded checksum, requires `packaged-images.sha256` to verify, requires the live boot partition to still be byte-identical to that rollback image, records `untested-flash.env` as evidence, and prints the exact recovery command on any non-zero exit after the flash begins. `--confirm-untested` is rejected outright when temporary-test evidence does exist, so it cannot be used to sidestep a failed test.
+
+Recovery on this path rests entirely on the rollback image and on Fastboot remaining reachable through the hardware key combination. Do not use it unless `fastboot boot` has actually been shown to fail on the exact device.
 
 ## 8.4 Rollback from a working Android system
 
@@ -932,6 +974,7 @@ Production policy is:
 | NFS stalls during outage | `hard` mount waits for server | Restore connectivity; prefer SMB; avoid casual `soft` writes |
 | Mount busy | Photos, shell, or copy holds it | Stop users, leave directory, sync, normal unmount |
 | AVC denial | Wrong mount context/policy | Capture exact AVC; avoid permissive/broad allow rules |
+| "Internal problem with your device" dialog each boot | AOSP matrix requires `CONFIG_NFS_FS=n`; enabling it fails VINTF | Expected and cosmetic; dismiss it. See 4.1.1. Do not disable NFS to silence it |
 | Boot loop | Boot incompatibility | Restore checksummed original image to explicit recorded slot |
 
 ## 11.6 Residual security posture
