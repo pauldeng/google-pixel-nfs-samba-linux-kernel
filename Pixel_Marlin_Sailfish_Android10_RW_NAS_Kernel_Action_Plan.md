@@ -762,7 +762,40 @@ Do not mount the same share blindly over all three runtime views. Do not use a d
 
 The earlier `chown 1023:1023` and `chmod 0775` instructions were removed: sdcardfs discards UID, GID, and mode changes and synthesizes permissions from its own policy.
 
-## 9.8 Persistent Magisk service
+## 9.8 Mandatory: CAP_NET_RAW for the kernel domain
+
+Without this the mount cannot survive a network interruption, which makes unattended operation impossible. Install it before the persistent service.
+
+`CONFIG_ANDROID_PARANOID_NETWORK` gates socket creation on `in_egroup_p(AID_INET) || capable(CAP_NET_RAW)` (`net/ipv4/af_inet.c:278`). The initial mount succeeds because the socket is created in the mounting process's context, which holds the capability. When the SMB session later drops, the `cifsd` kernel thread rebuilds the socket in `u:r:kernel:s0`, SELinux denies `net_raw`, `inet_create` returns `-EACCES`, and the mount is dead while still listed in `/proc/mounts`. Every read then returns `Host is down` and `cifsd` retries every three seconds indefinitely. Measured on sailfish 2026-08-02: 706 accumulated failures after a single doze cycle.
+
+``` text
+CIFS VFS: Error -13 creating socket
+avc: denied { net_raw } for comm="cifsd" capability=13
+     scontext=u:r:kernel:s0 tcontext=u:r:kernel:s0 tclass=capability permissive=0
+```
+
+``` bash
+./install-sepolicy-module.sh
+```
+
+The module carries exactly one rule, `allow kernel kernel capability net_raw`. It grants one capability to kernel threads only; app domains are unaffected and `CONFIG_ANDROID_PARANOID_NETWORK` stays enabled, so the `INTERNET` permission remains enforced. Rebuilding the kernel with that option disabled would also fix the reconnect, but it would let every application use the network regardless of its permissions and costs a rebuild, repack and reflash. Prefer the rule.
+
+> **On a file-based-encrypted device the rule applies from the SECOND reboot**
+>
+> `/data` is FBE (`ro.crypto.type=file`), so Magisk cannot read `/data/adb/modules/*/sepolicy.rule` at pre-init. It collects module rules during boot and stages them to `/data/unencrypted/magisk/sepolicy.rule`, which pre-init can read on the next boot. Confirmed by timestamps: boot completed 00:01, staged file written 00:02. The first reboot after installing therefore still shows `net_raw` denials, and the rule only takes effect on the reboot after that. Do not conclude the module has failed until two reboots have passed. `magiskpolicy --live "allow kernel kernel capability net_raw"` applies it immediately for testing and is cleared by any reboot.
+
+Acceptance after the second reboot, both counts zero across a deliberate Wi-Fi teardown:
+
+``` bash
+adb shell "su -c 'dmesg | grep -c \"denied { net_raw }\"'"
+adb shell "su -c 'dmesg | grep -c \"Error -13 creating socket\"'"
+```
+
+> **Remove other mounting modules**
+>
+> A pre-existing third-party CIFS module such as `multi-mount` duplicates this role and may mount with weaker options. Retire it with `touch /data/adb/modules/<id>/remove` and reboot.
+
+## 9.9 Persistent Magisk service
 
 Install only the configuration that passed the corresponding manual test:
 
@@ -795,7 +828,7 @@ It executes the checker separately through `su -mm` and plain `su` launched from
 
 A 2016 phone on Wi-Fi may encounter Doze, sleep, reconnect storms, stale sessions, and battery drain. Keep the appliance powered safely, observe `dumpsys deviceidle` and Wi-Fi behavior over at least one overnight cycle, and add any battery-optimization exemption only as an explicit measured operational decision.
 
-## 9.9 Clean unmount and Termux operation
+## 9.10 Clean unmount and Termux operation
 
 The external unmount script accepts only approved explicit targets. From the host:
 
@@ -976,6 +1009,7 @@ Production policy is:
 | NFS stalls during outage | `hard` mount waits for server | Restore connectivity; prefer SMB; avoid casual `soft` writes |
 | Mount busy | Photos, shell, or copy holds it | Stop users, leave directory, sync, normal unmount |
 | AVC denial | Wrong mount context/policy | Capture exact AVC; avoid permissive/broad allow rules |
+| Mount reads `Host is down` after a network blip and never recovers | `cifsd` denied `net_raw`, cannot rebuild its socket | Install `install-sepolicy-module.sh`; allow two reboots on an FBE device. See 9.8 |
 | "Internal problem with your device" dialog each boot | AOSP matrix requires `CONFIG_NFS_FS=n`; enabling it fails VINTF | Expected and cosmetic; dismiss it. See 4.1.1. Do not disable NFS to silence it |
 | Boot loop | Boot incompatibility | Restore checksummed original image to explicit recorded slot |
 
@@ -998,6 +1032,7 @@ The executable implementation is deliberately outside this Markdown document:
 | `device-deploy.sh` | Backup, temporary tests, one-slot flash, rollback |
 | `90-nas-mount.sh` | Read-only rejection or read/write mount probe |
 | `test-nas-mount.sh` | Host-to-device manual test wrapper |
+| `install-sepolicy-module.sh` | Magisk module granting the kernel domain CAP_NET_RAW so CIFS can reconnect |
 | `install-nas-service.sh` | Magisk service/config/secret installation |
 | `check-nas-namespace.sh` | Device-side mount/namespace evidence collector |
 | `verify-nas-service.sh` | Independent post-reboot global/plain namespace gate |

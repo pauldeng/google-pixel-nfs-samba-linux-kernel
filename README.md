@@ -69,6 +69,7 @@ Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/
   device-deploy.sh
   90-nas-mount.sh
   test-nas-mount.sh
+  install-sepolicy-module.sh
   install-nas-service.sh
   check-nas-namespace.sh
   verify-nas-service.sh
@@ -186,6 +187,14 @@ chmod 0600 ../pixel-nas-operator-config/nas-mount.conf \
 
 The read-only test requires the exact source, filesystem type, and `ro` mode, then proves that a root write is rejected. NFS and isolated read/write examples are documented in Section 9 of the action plan.
 
+Before installing the persistent service, install the SELinux module:
+
+```bash
+./install-sepolicy-module.sh
+```
+
+It carries one rule, `allow kernel kernel capability net_raw`. Without it the in-kernel CIFS client cannot rebuild its socket after a network interruption: the session drops during doze, `cifsd` is denied `net_raw`, and the mount stays listed in `/proc/mounts` while every read returns `Host is down`. On a file-based-encrypted device Magisk stages module rules for the *next* boot, so allow **two reboots** before judging whether it worked.
+
 Install a persistent Magisk service only after the corresponding manual test passes. The service uses a bounded TCP connection check against port 445 for SMB or 2049 for NFS, so NAS appliances that intentionally reject ICMP remain supported. After reboot, run `./verify-nas-service.sh`; it compares the mount from independent `su -mm` and plain `su` shells launched through adb instead of accepting only the service's own view. A pass establishes host-shell visibility only—it does not inspect Google Photos or any other app namespace.
 
 ## Validation status
@@ -205,15 +214,20 @@ Verified locally on 1 August 2026:
 
 The successful build reported kernel release `3.18.137-nas1+`. The trailing `+` is expected for this clean detached Git worktree; acceptance requires the `-nas1` marker.
 
-Not yet physically validated:
+Validated on hardware 2026-08-02 (Pixel / sailfish):
 
-- MagiskBoot packaging on a Pixel;
-- no-op or custom `fastboot boot`;
-- permanent flash or rollback;
-- SMB/NFS mounts against a NAS;
-- Android mount-namespace and SELinux behavior;
-- MediaStore indexing and Google Photos upload;
-- NAS-off boot and overnight Wi-Fi/Doze behavior.
+- custom kernel flashed to the active slot; `uname -r` reports `3.18.137-nas1+` with Magisk root intact;
+- QNAP `Multimedia/Photo/...` mounted read-only over SMB 3.0 at a root-only path, reads byte-identical to the NAS copy, writes refused;
+- mount returns automatically about 55 seconds after boot and survives a full Wi-Fi teardown;
+- a staged photo reached Google Photos at original quality.
+
+Still unvalidated:
+
+- `fastboot boot` is unsupported on this bootloader; see 8.3.1 of the plan;
+- rollback (the image is verified and preserved but has not been exercised);
+- NFSv3 against a real export;
+- the experimental direct-mount-into-shared-storage path;
+- boot with the NAS powered off, and overnight Doze behaviour.
 
 These are mandatory acceptance gates, not optional follow-up work.
 
