@@ -50,13 +50,32 @@ local_log="./pixel-nas-mount-test-$(date -u +%Y%m%dT%H%M%SZ).log"
   echo "ERROR: refusing to overwrite log: $local_log" >&2
   exit 1
 }
+fetch_remote_log() {
+  # The mount script runs with umask 077, so its log is root-owned mode 0600.
+  # `adb pull` runs as the shell user and fails with "Permission denied", which
+  # previously discarded the evidence for a failed mount and made a successful
+  # mount look like a failure. Read it back through su instead.
+  local contents
+  contents=$(root_cmd "cat /data/local/tmp/pixel-nas-mount-test.log 2>/dev/null" | tr -d '\r')
+  [[ -n $contents ]] || return 1
+  (
+    umask 077
+    printf '%s\n' "$contents" >"$local_log"
+  )
+}
 remote_command="chmod 0700 /data/local/tmp/pixel-nas-mount-test.sh; chmod 0600 /data/local/tmp/pixel-nas-mount-test.conf /data/local/tmp/pixel-nas-mount-test.secret 2>/dev/null || true; rm -f /data/local/tmp/pixel-nas-mount-test.log; $remote_prefix /data/local/tmp/pixel-nas-mount-test.sh /data/local/tmp/pixel-nas-mount-test.conf"
 if ! global_root_cmd "$remote_command"; then
-  adb -s "$serial" pull /data/local/tmp/pixel-nas-mount-test.log "$local_log" >/dev/null 2>&1 || true
-  [[ ! -f $local_log ]] || echo "Saved failed-mount evidence: $local_log" >&2
+  if fetch_remote_log; then
+    echo "Saved failed-mount evidence: $local_log" >&2
+  else
+    echo "ERROR: the mount failed and produced no readable log" >&2
+  fi
   exit 1
 fi
-adb -s "$serial" pull /data/local/tmp/pixel-nas-mount-test.log "$local_log"
+fetch_remote_log || {
+  echo "ERROR: the mount reported success but its log could not be read" >&2
+  exit 1
+}
 cleanup_remote
 trap - EXIT INT TERM
 echo "Saved mount evidence: $local_log"
