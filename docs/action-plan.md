@@ -829,7 +829,9 @@ adb shell su -c 'tail -n 150 /data/adb/nas-mount.log'
 
 The default production service is the read-only source mount. Install the read/write configuration only when a root-only phone upload path is genuinely required. One active configuration is installed at a time in this revision. SMB credentials are streamed through ADB stdin directly into a root-owned `0600` temporary file under `/data/adb`; they are never pushed through the shell-readable `/data/local/tmp` staging area.
 
-The bounded readiness wait opens the protocol's actual IPv4 TCP port with Android 10 Toybox `nc`: 445 for SMB or 2049 for NFS. It does not require ICMP echo. Before production, prove:
+The bounded readiness wait opens the protocol's actual IPv4 TCP port with Android 10 Toybox `nc`: 445 for SMB or 2049 for NFS. It does not require ICMP echo. The deadline is taken from `/proc/uptime`, not the wall clock, because Android corrects the clock during boot and a correction would otherwise stretch or truncate the wait.
+
+A single bounded attempt is not enough for an appliance. If mains power returns and the phone finishes booting before the NAS finishes starting its shares, a one-shot service gives up and nothing tries again. `RETRY_INTERVAL_SECONDS` (default 300) and `RETRY_MAX_ATTEMPTS` (default 0, meaning unlimited) keep it retrying. Only transient conditions are retried: the port not answering, or a mount command that fails while the server is still coming up. A wrong credential, a missing share, an occupied target or a mount that comes up with the wrong source, type or mode stops immediately, because retrying a misconfiguration only produces noise and, for SMB, risks locking the account. Interactive runs through `test-nas-mount.sh` set `RETRY_INTERVAL_OVERRIDE=0` so they still fail fast. Before production, prove:
 
 1. Android completes boot with the NAS powered off.
 2. The bounded service attempt does not hold up boot indefinitely.

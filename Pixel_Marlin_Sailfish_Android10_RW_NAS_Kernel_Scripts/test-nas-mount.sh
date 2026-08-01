@@ -36,7 +36,9 @@ root_cmd id | grep -q 'uid=0(root)' || {
 }
 adb -s "$serial" push "$SCRIPT_DIR/90-nas-mount.sh" /data/local/tmp/pixel-nas-mount-test.sh
 adb -s "$serial" push "$config" /data/local/tmp/pixel-nas-mount-test.conf
-remote_prefix="LOG_PATH=/data/local/tmp/pixel-nas-mount-test.log"
+# One-shot for interactive testing: the installed service retries, but a
+# manual run must fail fast rather than loop for hours.
+remote_prefix="LOG_PATH=/data/local/tmp/pixel-nas-mount-test.log RETRY_INTERVAL_OVERRIDE=0"
 if [[ -n $secret ]]; then
   [[ -f $secret ]] || {
     echo "ERROR: secret file not found: $secret" >&2

@@ -19,8 +19,15 @@ fail() {
 WAIT_SECONDS=${WAIT_SECONDS:-60}
 SELINUX_CONTEXT=${SELINUX_CONTEXT:-}
 SMB_SECRET=${SMB_SECRET_OVERRIDE:-${SMB_SECRET:-}}
+# Seconds between retries after a transient failure; 0 disables retrying. The
+# override lets an interactive test fail fast instead of looping for hours.
+RETRY_INTERVAL_SECONDS=${RETRY_INTERVAL_OVERRIDE:-${RETRY_INTERVAL_SECONDS:-300}}
+# 0 means keep trying indefinitely, which is what an unattended appliance wants.
+RETRY_MAX_ATTEMPTS=${RETRY_MAX_ATTEMPTS:-0}
 
 case "$WAIT_SECONDS" in *[!0-9]* | '') fail "WAIT_SECONDS must be a non-negative integer" ;; esac
+case "$RETRY_INTERVAL_SECONDS" in *[!0-9]* | '') fail "RETRY_INTERVAL_SECONDS must be a non-negative integer" ;; esac
+case "$RETRY_MAX_ATTEMPTS" in *[!0-9]* | '') fail "RETRY_MAX_ATTEMPTS must be a non-negative integer" ;; esac
 case "$SELINUX_CONTEXT" in '' | u:object_r:media_rw_data_file:s0) ;; *) fail "unsupported SELinux context" ;; esac
 
 case "$NAS_HOST" in
@@ -178,58 +185,105 @@ fail_probe_and_unmount() {
   fail "$probe_context: $probe_reason; mount was unmounted"
 }
 
-if validate_mount; then
-  if ! probe_mount; then
-    fail_probe_and_unmount "existing mount failed functional probe"
-  fi
-  log "existing mount validated: $TARGET"
-  exit 0
-elif [ -n "$(mounted_line)" ]; then
-  fail "target is occupied by a different or invalid mount"
-fi
-
-mkdir -p "$TARGET"
-if find "$TARGET" -mindepth 1 -maxdepth 1 | grep -q .; then
-  fail "refusing to hide non-empty target"
-fi
-
 if [ "$PROTOCOL" = smb ]; then
   service_port=445
 else
   service_port=2049
 fi
-if ! wait_for_service_port; then
-  fail "$PROTOCOL TCP port $service_port did not become reachable within $WAIT_SECONDS seconds"
-fi
-log "$PROTOCOL TCP port $service_port is reachable"
 
-context_opt=""
-[ -n "$SELINUX_CONTEXT" ] && context_opt=",context=$SELINUX_CONTEXT"
-if [ "$PROTOCOL" = smb ]; then
-  [ -r "$SMB_SECRET" ] || fail "SMB secret is unreadable"
-  PASS=$(tr -d '\r\n' <"$SMB_SECRET")
-  case "$PASS" in *','* | '')
-    unset PASS
-    fail "SMB password is empty or contains a comma"
-    ;;
-  esac
-  modes="file_mode=0444,dir_mode=0555"
-  [ "$MOUNT_MODE" = rw ] && modes="file_mode=0664,dir_mode=0775"
-  /system/bin/mount -t cifs "$SMB_SOURCE" "$TARGET" \
-    -o "$MOUNT_MODE,vers=3.0,sec=ntlmssp,username=$SMB_USER,password=$PASS,uid=1023,gid=1023,forceuid,forcegid,$modes,noperm,iocharset=utf8,nosuid,nodev,noexec$context_opt"
-  unset PASS
-elif [ "$PROTOCOL" = nfs ]; then
-  /system/bin/mount -t nfs "$NAS_HOST:$NFS_EXPORT" "$TARGET" \
-    -o "$MOUNT_MODE,vers=3,proto=tcp,nolock,hard,noatime,nosuid,nodev,noexec,addr=$NAS_HOST$context_opt"
-fi
-
-if ! validate_mount; then
-  if ! /system/bin/umount "$TARGET"; then
-    fail "new mount failed source/type/mode validation and cleanup unmount also failed"
+# One mount attempt. 0 = mounted, 1 = worth retrying, 2 = do not retry.
+#
+# Only "the server is not answering yet" is retryable. A wrong credential, a
+# missing share or a mount that comes up with the wrong source, type or mode is
+# a configuration error: retrying it forever would log noise indefinitely and,
+# for SMB, could lock the NAS account.
+attempt_mount() {
+  if validate_mount; then
+    if ! probe_mount; then
+      fail_probe_and_unmount "existing mount failed functional probe"
+    fi
+    log "existing mount validated: $TARGET"
+    return 0
   fi
-  fail "new mount failed source/type/mode validation; mount was unmounted"
-fi
-if ! probe_mount; then
-  fail_probe_and_unmount "new mount failed functional probe"
-fi
-log "mounted and validated: $TARGET"
+  if [ -n "$(mounted_line)" ]; then
+    log "ERROR: target is occupied by a different or invalid mount"
+    return 2
+  fi
+
+  mkdir -p "$TARGET"
+  if find "$TARGET" -mindepth 1 -maxdepth 1 | grep -q .; then
+    log "ERROR: refusing to hide non-empty target"
+    return 2
+  fi
+
+  if ! wait_for_service_port; then
+    log "$PROTOCOL TCP port $service_port not reachable within $WAIT_SECONDS seconds"
+    return 1
+  fi
+  log "$PROTOCOL TCP port $service_port is reachable"
+
+  context_opt=""
+  [ -n "$SELINUX_CONTEXT" ] && context_opt=",context=$SELINUX_CONTEXT"
+  mount_rc=0
+  if [ "$PROTOCOL" = smb ]; then
+    [ -r "$SMB_SECRET" ] || {
+      log "ERROR: SMB secret is unreadable"
+      return 2
+    }
+    PASS=$(tr -d '\r\n' <"$SMB_SECRET")
+    case "$PASS" in *','* | '')
+      unset PASS
+      log "ERROR: SMB password is empty or contains a comma"
+      return 2
+      ;;
+    esac
+    modes="file_mode=0444,dir_mode=0555"
+    [ "$MOUNT_MODE" = rw ] && modes="file_mode=0664,dir_mode=0775"
+    /system/bin/mount -t cifs "$SMB_SOURCE" "$TARGET" \
+      -o "$MOUNT_MODE,vers=3.0,sec=ntlmssp,username=$SMB_USER,password=$PASS,uid=1023,gid=1023,forceuid,forcegid,$modes,noperm,iocharset=utf8,nosuid,nodev,noexec$context_opt" || mount_rc=$?
+    unset PASS
+  else
+    /system/bin/mount -t nfs "$NAS_HOST:$NFS_EXPORT" "$TARGET" \
+      -o "$MOUNT_MODE,vers=3,proto=tcp,nolock,hard,noatime,nosuid,nodev,noexec,addr=$NAS_HOST$context_opt" || mount_rc=$?
+  fi
+  if [ "$mount_rc" -ne 0 ]; then
+    # The port answered but the mount did not complete. A NAS that has started
+    # its listener before its shares are ready looks exactly like this, so treat
+    # it as retryable rather than fatal.
+    log "mount command failed with status $mount_rc"
+    return 1
+  fi
+
+  if ! validate_mount; then
+    if ! /system/bin/umount "$TARGET"; then
+      fail "new mount failed source/type/mode validation and cleanup unmount also failed"
+    fi
+    log "ERROR: new mount failed source/type/mode validation; mount was unmounted"
+    return 2
+  fi
+  if ! probe_mount; then
+    fail_probe_and_unmount "new mount failed functional probe"
+  fi
+  log "mounted and validated: $TARGET"
+  return 0
+}
+
+# A one-shot service loses to a slow NAS: if the phone finishes booting before
+# the NAS finishes starting Samba, nothing ever tries again and the appliance
+# sits idle until someone notices. Keep retrying on transient failures.
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  attempt_status=0
+  attempt_mount || attempt_status=$?
+  case "$attempt_status" in
+    0) exit 0 ;;
+    2) fail "attempt $attempt hit a non-retryable condition; see the log above" ;;
+  esac
+  [ "$RETRY_INTERVAL_SECONDS" -gt 0 ] || fail "attempt $attempt failed and retrying is disabled"
+  if [ "$RETRY_MAX_ATTEMPTS" -gt 0 ] && [ "$attempt" -ge "$RETRY_MAX_ATTEMPTS" ]; then
+    fail "giving up after $attempt attempts"
+  fi
+  log "attempt $attempt failed; retrying in $RETRY_INTERVAL_SECONDS seconds"
+  sleep "$RETRY_INTERVAL_SECONDS"
+done

@@ -138,6 +138,69 @@ check "evidence requires a byte-identical control" yes \
 check "untested record splits attempt from completion" yes \
   "$([[ $deploy == *untested_flash_attempted_utc* && $deploy == *untested_flash_completed_utc* ]] && echo yes || echo no)"
 
+# ------------------------------------------------------------- retry policy
+# A one-shot service loses to a NAS that boots more slowly than the phone.
+mount_src=$(cat "$SCRIPTS/90-nas-mount.sh")
+check "retry interval is configurable" yes \
+  "$([[ $mount_src == *'RETRY_INTERVAL_SECONDS=${RETRY_INTERVAL_OVERRIDE:-${RETRY_INTERVAL_SECONDS:-300}}'* ]] && echo yes || echo no)"
+check "retry defaults to enabled for the installed service" yes \
+  "$([[ $mount_src == *':-300}}'* ]] && echo yes || echo no)"
+check "unlimited retries are the default" yes \
+  "$([[ $mount_src == *'RETRY_MAX_ATTEMPTS=${RETRY_MAX_ATTEMPTS:-0}'* ]] && echo yes || echo no)"
+check "interactive wrapper disables retrying" yes \
+  "$([[ $(cat "$SCRIPTS/test-nas-mount.sh") == *'RETRY_INTERVAL_OVERRIDE=0'* ]] && echo yes || echo no)"
+check "config errors are not retried" yes \
+  "$([[ $mount_src == *'non-retryable condition'* ]] && echo yes || echo no)"
+check "a failed mount command is retried" yes \
+  "$([[ $mount_src == *'mount command failed with status'* ]] && echo yes || echo no)"
+
+# Exercise the loop's decision table with a scripted attempt sequence.
+run_retry_loop() { # $1 = space-separated attempt_mount statuses
+  local i=0 attempt=0 attempt_status
+  local -a seq
+  read -r -a seq <<<"$1"
+  local RETRY_INTERVAL_SECONDS=${2:-1} RETRY_MAX_ATTEMPTS=${3:-0}
+  RETRY_LOG=""
+  while :; do
+    attempt=$((attempt + 1))
+    attempt_status=${seq[i]:-1}
+    i=$((i + 1))
+    case "$attempt_status" in
+      0)
+        RETRY_LOG="mounted after $attempt"
+        return 0
+        ;;
+      2)
+        RETRY_LOG="fatal at $attempt"
+        return 1
+        ;;
+    esac
+    [[ $RETRY_INTERVAL_SECONDS -gt 0 ]] || {
+      RETRY_LOG="no-retry at $attempt"
+      return 1
+    }
+    if [[ $RETRY_MAX_ATTEMPTS -gt 0 && $attempt -ge $RETRY_MAX_ATTEMPTS ]]; then
+      RETRY_LOG="gave up after $attempt"
+      return 1
+    fi
+    ((attempt > 50)) && {
+      RETRY_LOG="RUNAWAY"
+      return 1
+    }
+  done
+}
+
+run_retry_loop "1 1 0" 1 0 || true
+check "recovers when the NAS appears later" "mounted after 3" "$RETRY_LOG"
+run_retry_loop "1 2" 1 0 || true
+check "stops immediately on a config error" "fatal at 2" "$RETRY_LOG"
+run_retry_loop "1 1 1" 0 0 || true
+check "one-shot mode does not retry" "no-retry at 1" "$RETRY_LOG"
+run_retry_loop "1 1 1 1 1" 1 3 || true
+check "honours a maximum attempt count" "gave up after 3" "$RETRY_LOG"
+run_retry_loop "0" 1 0 || true
+check "first-attempt success needs no retry" "mounted after 1" "$RETRY_LOG"
+
 ((fails == 0)) || {
   printf 'FAIL: %d check(s) failed\n' "$fails" >&2
   exit 1

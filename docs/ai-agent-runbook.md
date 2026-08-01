@@ -41,6 +41,7 @@ Symptoms an agent will actually see, and what they mean.
 | `test-nas-mount.sh` reports failure but the mount is actually up | Fixed in `0e269aa`; it used `adb pull` on a root-owned `0600` log | Update the repo if you see this |
 | Mount reads `Host is down`, `/proc/mounts` still lists it, `CIFS VFS: Error -13 creating socket` every 3 s | `cifsd` denied `net_raw`, cannot rebuild its socket after the session drops | **Blocking for unattended use.** Install the sepolicy module (§10) |
 | sepolicy module installed but denials continue after one reboot | `/data` is FBE; Magisk stages module rules for the *next* boot | Reboot a second time before judging. See plan 9.8 |
+| Mount absent after a boot where the NAS was down | One-shot service gave up. Fixed: `RETRY_INTERVAL_SECONDS` keeps it trying | Reinstall the service; confirm the key is in `/data/adb/nas-mount.conf` |
 | Google Photos never lists the `NAS-Inbox` device folder | Photos 7.85 does not surface it even with correct MediaStore bucket metadata | Enable **Back up all device folders**. Uploads work regardless. |
 
 ## 3. Phase 0 — prerequisites the phone must already meet
