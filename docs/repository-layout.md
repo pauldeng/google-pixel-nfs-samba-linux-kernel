@@ -23,6 +23,7 @@ Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/
   device-deploy.sh
   90-nas-mount.sh
   test-nas-mount.sh
+  install-magisk-boot.sh
   install-sepolicy-module.sh
   install-nas-service.sh
   check-nas-namespace.sh

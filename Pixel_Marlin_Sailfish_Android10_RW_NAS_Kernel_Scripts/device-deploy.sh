@@ -406,7 +406,12 @@ case "$action" in
       # An untested flash is permitted only when `test` proved the bootloader
       # cannot RAM-boot at all. A custom image that boots but fails the kernel
       # identity or NFS/CIFS checks leaves no evidence, so it cannot reach here.
-      evidence_verdict=$(classify_untested_evidence "$state_dir" "$current_sha")
+      # Capture the status explicitly. The classifier returns non-zero for every
+      # refusal, and errexit aborts a failing assignment at this level, which
+      # would skip the case below and leave an ordinary stale-evidence refusal
+      # completely unexplained.
+      evidence_status=0
+      evidence_verdict=$(classify_untested_evidence "$state_dir" "$current_sha") || evidence_status=$?
       case "$evidence_verdict" in
         ok) ;;
         no-evidence)
@@ -433,10 +438,14 @@ case "$action" in
           exit 1
           ;;
         *)
-          echo "ERROR: unrecognised evidence verdict: $evidence_verdict" >&2
+          echo "ERROR: unrecognised evidence verdict: '$evidence_verdict' (status $evidence_status)" >&2
           exit 1
           ;;
       esac
+      ((evidence_status == 0)) || {
+        echo "ERROR: evidence classifier reported '$evidence_verdict' with status $evidence_status" >&2
+        exit 1
+      }
       expected_untested="UNTESTED:$device:$slot:${current_sha:0:12}"
       [[ $confirm_untested == "$expected_untested" ]] || {
         echo "ERROR: this bootloader cannot run the reversible test. To flash anyway:" >&2

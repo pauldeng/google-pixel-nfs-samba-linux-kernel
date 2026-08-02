@@ -193,10 +193,18 @@ fi
 
 # One mount attempt. 0 = mounted, 1 = worth retrying, 2 = do not retry.
 #
-# Only "the server is not answering yet" is retryable. A wrong credential, a
-# missing share or a mount that comes up with the wrong source, type or mode is
-# a configuration error: retrying it forever would log noise indefinitely and,
-# for SMB, could lock the NAS account.
+# Remote conditions retry; local ones do not. Anything that depends on the NAS
+# being ready -- the port not answering, or the mount command failing while the
+# server is still starting its shares -- is retried indefinitely, because a NAS
+# that boots more slowly than the phone must not leave the appliance idle. A
+# fault on this side cannot be fixed by waiting: an unusable or occupied mount
+# point, an unreadable or malformed secret, or a mount that comes up with the
+# wrong source, type or mode all stop immediately.
+# Every fallible operation below is guarded explicitly. This function is called
+# as the left side of `||`, which disables errexit for its whole body in both
+# Bash and mksh, so an unguarded failure would fall through: a mkdir that could
+# not create the mount point once turned a permanent local misconfiguration
+# into an endless retry loop.
 attempt_mount() {
   if validate_mount; then
     if ! probe_mount; then
@@ -210,8 +218,19 @@ attempt_mount() {
     return 2
   fi
 
-  mkdir -p "$TARGET"
-  if find "$TARGET" -mindepth 1 -maxdepth 1 | grep -q .; then
+  if ! mkdir -p "$TARGET"; then
+    log "ERROR: could not create the mount point $TARGET"
+    return 2
+  fi
+  if [ ! -d "$TARGET" ]; then
+    log "ERROR: mount point is not a directory: $TARGET"
+    return 2
+  fi
+  target_entries=$(find "$TARGET" -mindepth 1 -maxdepth 1 2>/dev/null) || {
+    log "ERROR: could not inspect the mount point $TARGET"
+    return 2
+  }
+  if [ -n "$target_entries" ]; then
     log "ERROR: refusing to hide non-empty target"
     return 2
   fi
@@ -230,7 +249,10 @@ attempt_mount() {
       log "ERROR: SMB secret is unreadable"
       return 2
     }
-    PASS=$(tr -d '\r\n' <"$SMB_SECRET")
+    PASS=$(tr -d '\r\n' <"$SMB_SECRET") || {
+      log "ERROR: could not read the SMB secret"
+      return 2
+    }
     case "$PASS" in *','* | '')
       unset PASS
       log "ERROR: SMB password is empty or contains a comma"

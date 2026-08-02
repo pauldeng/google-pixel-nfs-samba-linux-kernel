@@ -79,55 +79,47 @@ fastboot reboot
 
    **Tell the user to press Volume-Up to highlight "Unlock the bootloader", then Power to confirm.** The phone factory-resets and reboots. They must walk through Android setup again and re-enable USB debugging.
 
-4. **Install Magisk.** This writes the boot partition, so apply the same discipline the rest of this project uses rather than the bare command from Magisk's own guide. Record state, verify provenance, keep a rollback, and re-check immediately before writing.
+4. **Install Magisk.** Step 3 factory-reset the phone, so the Magisk app is gone with everything else. `stage` reinstalls it before doing anything else: it downloads Magisk 29.0 from the official release, verifies it, installs it over ADB, and confirms the version on the phone. Do not sideload a Magisk build from anywhere else.
+
+   What "verifies" means here, precisely, because it is easy to overstate:
+
+   | Check | What it establishes |
+   |---|---|
+   | Pinned size and SHA-256 of the whole APK | Every byte matches the official asset. This is the primary protection. |
+   | PKCS#7 signature over `META-INF/CERT.SF`, and `CERT.SF`'s digest of `MANIFEST.MF` | The key owning the printed certificate (`CN = John Wu`) really signed this archive's manifest — not merely that its certificate is embedded. |
+   | Pinned certificate fingerprint | That signer is the expected publisher. |
+   | `adb install -r` succeeds | Android refuses to replace a package signed by a different key, so the app already on the phone shares that signer. |
+
+   It does **not** re-hash all ~1000 entries, and it does not read the v2/v3 APK Signing Block that Android itself verifies (this APK declares `X-Android-APK-Signed: 2`). Entry-level tampering is caught by the pinned whole-file checksum, which runs first — not by the signature check. For complete verification, `apksigner verify --print-certs` is the right tool; it needs a JRE, which Phase 0 does not otherwise require, so it is left as an optional manual cross-check.
+
+   This writes a boot partition, so it runs through a script with the same gates as every other write in this project rather than as loose commands. Nothing to download by hand: the only supported source for the stock boot image is Google's official factory archive for `QP1A.191005.007.A3`, and the script has both the `dl.google.com` URL and the SHA-256 Google publishes beside it built in. Do not pass a `boot.img` from anywhere else — there is no option to, because no published checksum can authenticate a bare member somebody else extracted.
 
    ```bash
-   # a. Bind the work to this exact phone.
-   serial=$(adb get-serialno)
-   device=$(adb shell getprop ro.product.device | tr -d '\r')
-   build=$(adb shell getprop ro.build.id | tr -d '\r')
-   slot=$(adb shell getprop ro.boot.slot_suffix | tr -d '\r'); slot=${slot#_}
-   printf 'serial=%s device=%s build=%s slot=%s\n' "$serial" "$device" "$build" "$slot"
+   cd Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts
+   ./install-magisk-boot.sh stage --workspace "$HOME/pixel-nas-build-workspace"
    ```
 
-   Stop unless `device` is `marlin` or `sailfish`, `build` is exactly `QP1A.191005.007.A3`, and `slot` is `a` or `b`.
+   **Tell the user:** this downloads about 1.4 GB and takes several minutes on a typical link. Do not touch the phone. An interrupted download resumes on the next run; it is not restarted from zero. The archive is cached under `<workspace>/factory/`, so a second run does not download it again. About 3 GB of free disk is needed in the workspace.
+
+   If the archive is already on the machine, point at it with `--factory-zip /path/to/<device>-qp1a.191005.007.a3-factory-<hash>.zip`. That only skips the download; the file is still checked against the same pinned size and checksum, so a copy from anywhere other than Google is refused.
+
+   `stage` verifies codename, build, Android version and slot; verifies the factory archive against the size and checksum Google publishes and extracts `boot.img` itself; authenticates that image as a real boot image for this device and build; **records** any pre-existing patched images without deleting them; and pushes `boot.img` for patching.
+
+   **Tell the user:** unlock the screen, open the Magisk app, then *Install → Select and Patch a File → `/sdcard/Download/boot.img`*. Nothing to press on the bootloader yet.
 
    ```bash
-   # b. Obtain the factory image for THAT build and keep its checksum.
-   #    Extract boot.img from the matching factory archive from
-   #    https://developers.google.com/android/images and record provenance:
-   sha256sum boot.img | tee boot.img.sha256
+   ./install-magisk-boot.sh flash --workspace "$HOME/pixel-nas-build-workspace"
    ```
 
-   The image must match the build reported above. A `boot.img` from any other build is a hard stop.
+   The first run refuses and prints the required token plus the recovery command. `flash` re-verifies the stock checksum, resolves **exactly one** patched image on the device and stops if there are none or several, refuses an image identical to the stock one, re-reads Fastboot `product`, `current-slot` and `unlocked` and compares them programmatically, checks the image fits the partition, writes `boot_$slot` explicitly, and verifies root afterwards. On any failure it prints the recovery command.
 
-   ```bash
-   # c. Patch on THIS device. Magisk requires the image be patched on the
-   #    target phone; a patched image from another device is not valid here.
-   adb push boot.img /sdcard/Download/
-   # In the Magisk app: Install -> Select and Patch a File -> pick boot.img
-   adb pull /sdcard/Download/magisk_patched-*.img ./magisk_patched.img
-   sha256sum magisk_patched.img | tee magisk_patched.img.sha256
-   ```
+   **Have the user record the recovery command off the host before authorising**, then rerun with `--confirm-flash 'FLASHBOOT:<device>:<slot>:<hash>'`.
 
-   ```bash
-   # d. Re-verify immediately before writing, and name the slot explicitly.
-   adb reboot bootloader
-   fastboot -s "$serial" getvar product        # expect: $device
-   fastboot -s "$serial" getvar current-slot   # expect: $slot
-   fastboot -s "$serial" getvar unlocked       # expect: yes
-   ```
+   The recovery command is `install-magisk-boot.sh rollback`, which re-verifies the retained stock checksum, re-authenticates the image, re-reads Fastboot product and unlock state, and needs its own `ROLLBACK:` token. A raw `fastboot flash` line is printed underneath it as a last resort only; prefer the gated command.
 
-   **Ask the user to confirm the flash explicitly at this point.** Do not proceed on implied consent. Then:
+   Rollback deliberately does **not** require Fastboot's current slot to match the slot it targets. After a bad boot the bootloader may have failed over to the untouched slot, which is exactly when rollback runs; it prints a `NOTE:` about the mismatch and continues, because the write names `boot_<slot>` explicitly and cannot reach the other slot. `flash` keeps the strict check. This follows the deployment policy in [`action-plan.md`](action-plan.md): *do not rely on Fastboot current-slot after a failed boot*.
 
-   ```bash
-   fastboot -s "$serial" flash "boot_$slot" magisk_patched.img
-   fastboot -s "$serial" reboot
-   ```
-
-   Naming `boot_$slot` rather than `boot` avoids relying on Fastboot's current-slot default on an A/B device.
-
-   **Recovery:** keep `boot.img` and its checksum. If the phone does not boot, hold **Power + Volume-Down**, then `fastboot -s "$serial" flash "boot_$slot" boot.img`. Tell the user to record that command somewhere off the host before step d.
+   **This is the one moment in the whole procedure where the user must touch the phone.** After the write, the phone reboots and the script waits for root. The first `su` raises a Magisk dialog. Tell the user, in these words: *unlock the screen, and when Magisk asks to grant Superuser access to "Shell", press Grant.* The wait is bounded at about three minutes and then fails with instructions; it does not hang.
 
 5. **Re-verify** with the block at the top of this section. `su -c id` must return `uid=0(root)`.
 

@@ -831,7 +831,7 @@ The default production service is the read-only source mount. Install the read/w
 
 The bounded readiness wait opens the protocol's actual IPv4 TCP port with Android 10 Toybox `nc`: 445 for SMB or 2049 for NFS. It does not require ICMP echo. The deadline is taken from `/proc/uptime`, not the wall clock, because Android corrects the clock during boot and a correction would otherwise stretch or truncate the wait.
 
-A single bounded attempt is not enough for an appliance. If mains power returns and the phone finishes booting before the NAS finishes starting its shares, a one-shot service gives up and nothing tries again. `RETRY_INTERVAL_SECONDS` (default 300) and `RETRY_MAX_ATTEMPTS` (default 0, meaning unlimited) keep it retrying. Only transient conditions are retried: the port not answering, or a mount command that fails while the server is still coming up. A wrong credential, a missing share, an occupied target or a mount that comes up with the wrong source, type or mode stops immediately, because retrying a misconfiguration only produces noise and, for SMB, risks locking the account. Interactive runs through `test-nas-mount.sh` set `RETRY_INTERVAL_OVERRIDE=0` so they still fail fast. Before production, prove:
+A single bounded attempt is not enough for an appliance. If mains power returns and the phone finishes booting before the NAS finishes starting its shares, a one-shot service gives up and nothing tries again. `RETRY_INTERVAL_SECONDS` (default 300) and `RETRY_MAX_ATTEMPTS` (default 0, meaning unlimited) keep it retrying. The distinction is remote versus local. Anything that depends on the NAS being ready is retried indefinitely: the port not answering, or a mount command that fails while the server is still starting its shares. This includes a credential the server has not yet loaded, which surfaces as a failed mount command. Faults on the phone side cannot be fixed by waiting and stop immediately: an unusable or occupied mount point, an unreadable or malformed secret file, or a mount that comes up with the wrong source, type or mode. Interactive runs through `test-nas-mount.sh` set `RETRY_INTERVAL_OVERRIDE=0` so they still fail fast. Before production, prove:
 
 1. Android completes boot with the NAS powered off.
 2. The bounded service attempt does not hold up boot indefinitely.
@@ -969,7 +969,7 @@ Production policy is:
 
 **[ ]** Keep the checksummed rollback image and explicit-slot command in a second accessible location.
 
-**[ ]** Inspect phone display, Wi-Fi, charging, camera, root, and responsiveness after both temporary boots.
+**[ ]** Inspect phone display, Wi-Fi, charging, camera, root, and responsiveness after each temporary boot on branch A, or immediately after the persistent flash on branch B where no temporary boot is possible.
 
 **[ ]** Confirm reader and writer NAS identities cannot cross their assigned share boundaries.
 
@@ -1055,6 +1055,7 @@ The executable implementation is deliberately outside this Markdown document:
 | `device-deploy.sh` | Backup, temporary tests, one-slot flash, rollback |
 | `90-nas-mount.sh` | Read-only rejection or read/write mount probe |
 | `test-nas-mount.sh` | Host-to-device manual test wrapper |
+| `install-magisk-boot.sh` | Gated staging and flashing of a Magisk-patched boot image to root a supported phone |
 | `install-sepolicy-module.sh` | Magisk module granting the kernel domain CAP_NET_RAW so CIFS can reconnect |
 | `install-nas-service.sh` | Magisk service/config/secret installation |
 | `check-nas-namespace.sh` | Device-side mount/namespace evidence collector |
@@ -1124,4 +1125,4 @@ IMPLEMENTATION
 
 > **Completion criterion**
 >
-> Completion requires verified companion checksums, reproducible locked build, no-op and custom temporary boots with Magisk root, checksummed rollback, correct read-only/write-probe behavior, bounded NAS-off boot, acceptable overnight Wi-Fi behavior, a checksum-verified explicitly indexed image uploaded by Photos, clean unmount, and—only if authorised—a one-slot persistent flash followed by root/kernel verification.
+> Completion requires verified companion checksums, reproducible locked build, no-op and custom temporary boots with Magisk root on branch A (or recorded bootloader-limitation evidence on branch B, with root and `-nas1` verified immediately after the persistent flash), checksummed rollback, correct read-only/write-probe behavior, bounded NAS-off boot, acceptable overnight Wi-Fi behavior, a checksum-verified explicitly indexed image uploaded by Photos, clean unmount, and—only if authorised—a one-slot persistent flash followed by root/kernel verification.

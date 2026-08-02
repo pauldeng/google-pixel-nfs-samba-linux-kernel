@@ -3,7 +3,9 @@
 #         for in the scripts under test; expansion would defeat the purpose.
 # SC2034: WAIT_SECONDS is read by the wait helper that is eval'd in from
 #         90-nas-mount.sh, so ShellCheck cannot see the use.
-# shellcheck disable=SC2016,SC2034
+# SC2329: the stubs below are invoked indirectly, by functions eval'd in from
+#         the scripts under test, so ShellCheck sees no call site.
+# shellcheck disable=SC2016,SC2034,SC2329
 set -euo pipefail
 
 # Regression coverage for the decision logic that gates flashing and mounting.
@@ -184,6 +186,29 @@ d=$(make_state good2)
 check "verdict is non-zero for every refusal" yes \
   "$(classify_untested_evidence "$EVIDENCE_ROOT/missing" x >/dev/null && echo no || echo yes)"
 
+# The production call site must capture the classifier's status. errexit aborts
+# a failing assignment at that level, which would skip the case block entirely
+# and leave every refusal unexplained. Testing the classifier alone missed this.
+deploy_src=$(cat "$SCRIPTS/device-deploy.sh")
+check "call site captures the classifier status" yes \
+  "$([[ $deploy_src == *'evidence_verdict=$(classify_untested_evidence "$state_dir" "$current_sha") || evidence_status=$?'* ]] && echo yes || echo no)"
+
+# Prove the pattern itself keeps the diagnostics reachable under errexit.
+call_site_reaches_case() { # $1 = "guarded" | "bare"
+  bash -c '
+    set -euo pipefail
+    classify() { printf "no-evidence\n"; return 1; }
+    if [ "$1" = guarded ]; then
+      st=0; v=$(classify) || st=$?
+    else
+      v=$(classify)
+    fi
+    case "$v" in no-evidence) printf "reached\n" ;; esac
+  ' _ "$1" 2>/dev/null || true
+}
+check "guarded assignment reaches the diagnostics" reached "$(call_site_reaches_case guarded)"
+check "bare assignment does not (this was the bug)" "" "$(call_site_reaches_case bare)"
+
 # Ordering invariants that are genuinely textual: the attempt record must be
 # written after the size check and the completion record after the write.
 deploy=$(cat "$SCRIPTS/device-deploy.sh")
@@ -200,6 +225,66 @@ check "completion is recorded after the write" yes \
 check "prepare clears stale verdicts" yes \
   "$([[ $deploy == *'rm -f "$state_dir/test-success.env" "$state_dir/test-unsupported.env" "$state_dir/untested-flash.env"'* ]] && echo yes || echo no)"
 
+# --------------------------------------------- attempt_mount failure handling
+# attempt_mount is invoked as the left side of `||`, which disables errexit for
+# its entire body in both Bash and mksh. Unguarded operations therefore fall
+# through instead of aborting, and a permanent local failure gets misclassified
+# as retryable, producing an endless loop.
+#
+# The stubs must let control reach the mount command, otherwise an earlier
+# guard masks the one under test. /system/bin/mount does not exist on the test
+# host, so the mount step fails naturally with 127 and would be classified
+# retryable unless an earlier guard correctly stops it.
+eval "$(sed -n '/^attempt_mount()/,/^}/p' "$SCRIPTS/90-nas-mount.sh")"
+
+ATTEMPT_ROOT=$(mktemp -d)
+printf 'a-real-password\n' >"$ATTEMPT_ROOT/secret"
+TARGET="$ATTEMPT_ROOT/target"
+PROTOCOL=smb SELINUX_CONTEXT="" SMB_SECRET="$ATTEMPT_ROOT/secret" SMB_SOURCE=//x/y
+SMB_USER=u MOUNT_MODE=ro service_port=445
+log() { :; }
+fail() {
+  printf 'unexpected-fail\n'
+  exit 9
+}
+fail_probe_and_unmount() {
+  printf 'unexpected-fail\n'
+  exit 9
+}
+validate_mount() { return 1; }
+mounted_line() { printf ''; }
+probe_mount() { return 0; }
+wait_for_service_port() { return 0; }
+
+run_attempt() {
+  local st=0
+  attempt_mount >/dev/null 2>&1 || st=$?
+  printf '%s\n' "$st"
+}
+
+# Sanity: with everything healthy, the mount step itself fails on this host and
+# must be classified retryable. This is the control for the checks below.
+rm -rf "$TARGET"
+check "a failed mount command alone is retryable" 1 "$(run_attempt)"
+
+# The real regression: if the mount point cannot be created, that is permanent.
+# Without an explicit guard the failure falls through to the mount step and is
+# misreported as retryable, which loops forever.
+rm -rf "$TARGET"
+mkdir() { return 1; }
+mkdir_verdict=$(run_attempt)
+unset -f mkdir
+check "an unusable mount point is non-retryable, not an endless retry" 2 "$mkdir_verdict"
+
+command mkdir -p "$TARGET"
+wait_for_service_port() { return 1; }
+check "an unreachable port stays retryable" 1 "$(run_attempt)"
+wait_for_service_port() { return 0; }
+
+printf 'x\n' >"$TARGET/pre-existing"
+check "a non-empty target is non-retryable" 2 "$(run_attempt)"
+rm -rf "$ATTEMPT_ROOT"
+
 # ------------------------------------------------------------- retry policy
 # A one-shot service loses to a NAS that boots more slowly than the phone.
 mount_src=$(cat "$SCRIPTS/90-nas-mount.sh")
@@ -211,9 +296,9 @@ check "unlimited retries are the default" yes \
   "$([[ $mount_src == *'RETRY_MAX_ATTEMPTS=${RETRY_MAX_ATTEMPTS:-0}'* ]] && echo yes || echo no)"
 check "interactive wrapper disables retrying" yes \
   "$([[ $(cat "$SCRIPTS/test-nas-mount.sh") == *'RETRY_INTERVAL_OVERRIDE=0'* ]] && echo yes || echo no)"
-check "config errors are not retried" yes \
+check "local faults are not retried" yes \
   "$([[ $mount_src == *'non-retryable condition'* ]] && echo yes || echo no)"
-check "a failed mount command is retried" yes \
+check "remote mount-command failures are retried" yes \
   "$([[ $mount_src == *'mount command failed with status'* ]] && echo yes || echo no)"
 
 # Exercise the loop's decision table with a scripted attempt sequence.
@@ -262,6 +347,506 @@ run_retry_loop "1 1 1 1 1" 1 3 || true
 check "honours a maximum attempt count" "gave up after 3" "$RETRY_LOG"
 run_retry_loop "0" 1 0 || true
 check "first-attempt success needs no retry" "mounted after 1" "$RETRY_LOG"
+
+# ------------------------------------------------ magisk boot install gating
+# This script writes a boot partition, so it must carry the same gates as the
+# rest of the project. The Phase 0 procedure it replaces had none of them.
+magisk_src=$(cat "$SCRIPTS/install-magisk-boot.sh")
+check "binds to codename and locked build" yes \
+  "$([[ $magisk_src == *'unsupported device: $device'* && $magisk_src == *'Android build/version mismatch'* ]] && echo yes || echo no)"
+check "verifies the stock image, not merely records it" yes \
+  "$([[ $magisk_src == *'sha256sum -c stock-boot.img.sha256'* ]] && echo yes || echo no)"
+check "compares Fastboot product programmatically" yes \
+  "$([[ $magisk_src == *'Fastboot product mismatch'* ]] && echo yes || echo no)"
+check "compares Fastboot slot programmatically" yes \
+  "$([[ $magisk_src == *'Fastboot slot mismatch'* ]] && echo yes || echo no)"
+check "compares unlocked state programmatically" yes \
+  "$([[ $magisk_src == *'bootloader is not unlocked'* ]] && echo yes || echo no)"
+check "requires an image-bound confirmation token" yes \
+  "$([[ $magisk_src == *'FLASHBOOT:$device:$slot:${patched_sha:0:12}'* ]] && echo yes || echo no)"
+check "rejects an unpatched image" yes \
+  "$([[ $magisk_src == *'identical to the stock image'* ]] && echo yes || echo no)"
+check "names the slot explicitly rather than trusting the A/B default" yes \
+  "$([[ $magisk_src == *'flash "boot_$slot"'* ]] && echo yes || echo no)"
+check "every adb call is bound to the serial" yes \
+  "$(printf '%s\n' "$magisk_src" | grep -E '^\s*adb ' | grep -qv 'adb -s "\$serial"\|adb devices' && echo no || echo yes)"
+
+# The glob resolution must terminate, not merely warn. The Markdown version
+# ended its failure branch with a successful echo, so zero matches fell through
+# to `adb pull ""` and several matches silently selected a stale image.
+eval "$(sed -n '/^resolve_patched_image()/,/^}/p' "$SCRIPTS/install-magisk-boot.sh")"
+serial=UNUSED
+# The resolver compares against names recorded at stage time; an empty
+# record means every image found counts as new. set -u needs it defined.
+state_dir=$(mktemp -d)
+: >"$state_dir/pre-existing-patched.txt"
+probe_resolution() { # $1 = newline-separated device listing
+  local out
+  FAKE_LS=$1
+  # Stub the listing helper, not adb: the resolver delegates to it, and the
+  # helper's own clean-phone behaviour is asserted separately.
+  list_remote_patched() {
+    [[ -n $FAKE_LS ]] && printf '%s\n' "$FAKE_LS"
+    return 0
+  }
+  out=$( (resolve_patched_image) 2>/dev/null) && printf 'selected:%s\n' "$out" || printf 'stopped\n'
+}
+check "zero patched images stops" stopped "$(probe_resolution '')"
+check "two patched images stop rather than guessing" stopped \
+  "$(probe_resolution '/sdcard/Download/magisk_patched-1_aaa.img
+/sdcard/Download/magisk_patched-2_bbb.img')"
+check "exactly one patched image is selected" "selected:/sdcard/Download/magisk_patched-1_aaa.img" \
+  "$(probe_resolution '/sdcard/Download/magisk_patched-1_aaa.img')"
+
+# ------------------------------------------------- boot image authentication
+# Creating a checksum then verifying it proves only that a file has not changed;
+# it says nothing about provenance. These check that a file really is a boot
+# image for this device and build.
+eval "$(sed -n '/^# Android boot image header v0/,/^resolve_patched_image()/p' \
+  "$SCRIPTS/install-magisk-boot.sh" | sed '$d')"
+
+BOOTDIR=$(mktemp -d)
+device=sailfish
+make_boot() { # $1=path $2=hardware $3=os_version escapes [$4=kernel_sz $5=ramdisk_sz]
+  # Offsets: magic 0, kernel_size 8, ramdisk_size 16, page_size 36,
+  # header_version 40, os_version 44, cmdline 64. Body must match the header.
+  local ks=${4:-4096} rs=${5:-4096} ps=4096
+  # shellcheck disable=SC2059 # $3 carries \x escapes and must be the format.
+  {
+    printf 'ANDROID!'
+    printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $((ks & 255)) $((ks >> 8 & 255)) $((ks >> 16 & 255)) $((ks >> 24 & 255)))"
+    head -c 4 /dev/zero
+    printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $((rs & 255)) $((rs >> 8 & 255)) $((rs >> 16 & 255)) $((rs >> 24 & 255)))"
+    head -c 16 /dev/zero
+    printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $((ps & 255)) $((ps >> 8 & 255)) $((ps >> 16 & 255)) $((ps >> 24 & 255)))"
+    head -c 4 /dev/zero
+    printf "$3"
+    head -c 16 /dev/zero
+    printf 'androidboot.hardware=%s rest' "$2"
+    head -c 4096 /dev/zero
+    head -c "$ks" /dev/zero
+    head -c "$rs" /dev/zero
+  } >"$1"
+}
+probe_validate() { (validate_boot_image "$1" img) >/dev/null 2>&1 && echo ok || echo rejected; }
+
+make_boot "$BOOTDIR/good.img" sailfish '\x3a\x01\x00\x14'
+check "a correct boot image is accepted" ok "$(probe_validate "$BOOTDIR/good.img")"
+
+make_boot "$BOOTDIR/otherdev.img" marlin '\x3a\x01\x00\x14'
+check "a boot image for another device is rejected" rejected "$(probe_validate "$BOOTDIR/otherdev.img")"
+
+make_boot "$BOOTDIR/oldbuild.img" sailfish '\x39\x01\x00\x14'
+check "a boot image from another build is rejected" rejected "$(probe_validate "$BOOTDIR/oldbuild.img")"
+
+make_boot "$BOOTDIR/nokernel.img" sailfish '\\x3a\\x01\\x00\\x14' 0 4096
+check "a zero-length kernel is rejected" rejected "$(probe_validate "$BOOTDIR/nokernel.img")"
+
+make_boot "$BOOTDIR/noramdisk.img" sailfish '\\x3a\\x01\\x00\\x14' 4096 0
+check "a zero-length ramdisk is rejected" rejected "$(probe_validate "$BOOTDIR/noramdisk.img")"
+
+make_boot "$BOOTDIR/full.img" sailfish '\\x3a\\x01\\x00\\x14'
+head -c 6000 "$BOOTDIR/full.img" >"$BOOTDIR/trunc.img"
+check "a truncated image is rejected" rejected "$(probe_validate "$BOOTDIR/trunc.img")"
+
+head -c 4096 /dev/urandom >"$BOOTDIR/junk.img"
+check "a random file is rejected" rejected "$(probe_validate "$BOOTDIR/junk.img")"
+check "a missing file is rejected" rejected "$(probe_validate "$BOOTDIR/absent.img")"
+rm -rf "$BOOTDIR"
+
+magisk_src2=$(cat "$SCRIPTS/install-magisk-boot.sh")
+check "both images are authenticated, not just checksummed" yes \
+  "$([[ $magisk_src2 == *'validate_boot_image "$stock_boot" "stock boot image"'* &&
+    $magisk_src2 == *'validate_boot_image "$state_dir/magisk-patched.img" "patched boot image"'* ]] && echo yes || echo no)"
+check "the rollback image is size-checked too" yes \
+  "$([[ $magisk_src2 == *'check_fits_partition "$state_dir/stock-boot.img" "stock rollback image"'* ]] && echo yes || echo no)"
+check "structural fields are validated" yes \
+  "$([[ $magisk_src2 == *'zero-length kernel'* && $magisk_src2 == *'implausible page size'* && $magisk_src2 == *'is truncated'* ]] && echo yes || echo no)"
+# ------------------------------------------------ official factory provenance
+# The stock boot image has exactly one permitted source: Google's official
+# factory archive for the locked build, at a pinned URL, verified against the
+# SHA-256 Google publishes. The operator supplies neither. These run the pinning
+# logic instead of grepping for its error strings, so removing a check fails.
+eval "$(sed -n "/^# Google's official factory archives/,/^obtain_stock_boot()/p" \
+  "$SCRIPTS/install-magisk-boot.sh" | sed '$d')"
+
+# shellcheck source=Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/source-lock.env
+. "$SCRIPTS/source-lock.env" # verify_factory_pin compares against ANDROID_BUILD
+
+probe_pin() { (verify_factory_pin "$1") >/dev/null 2>&1 && echo ok || echo rejected; }
+lower_build=$(printf '%s' "$ANDROID_BUILD" | tr '[:upper:]' '[:lower:]')
+
+for dev in marlin sailfish; do
+  pinned_name=$(factory_archive "$dev")
+  pinned_sha=$(factory_sha256 "$dev")
+  check "$dev has a pinned official archive" ok "$(probe_pin "$dev")"
+  # Google names each archive after the first eight digits of its own checksum,
+  # so the two constants cross-check each other; a typo in either is caught.
+  check "$dev archive name restates its published checksum" "${pinned_sha:0:8}" \
+    "$(printf '%s' "$pinned_name" | sed -n 's/.*-factory-\([0-9a-f]*\)\.zip$/\1/p')"
+  check "$dev archive is for the locked build" yes \
+    "$([[ $pinned_name == "$dev-$lower_build-factory-"* ]] && echo yes || echo no)"
+done
+
+check "an unsupported device has no pinned archive" rejected "$(probe_pin walleye)"
+check "the archive is fetched from Google's own host" yes \
+  "$([[ $FACTORY_BASE_URL == https://dl.google.com/* ]] && echo yes || echo no)"
+check "a checksum that disagrees with the archive name is rejected" rejected \
+  "$( (
+    factory_sha256() { printf '%064d\n' 0; }
+    verify_factory_pin sailfish
+  ) >/dev/null 2>&1 && echo ok || echo rejected)"
+check "a pinned archive from another build is rejected" rejected \
+  "$( (
+    ANDROID_BUILD=QP1A.190711.020
+    verify_factory_pin sailfish
+  ) >/dev/null 2>&1 && echo ok || echo rejected)"
+
+ARCHDIR=$(mktemp -d)
+head -c 1024 /dev/urandom >"$ARCHDIR/fake.zip"
+check "an archive failing its published checksum is rejected" rejected \
+  "$( (verify_archive_checksum "$ARCHDIR/fake.zip" "$(factory_sha256 sailfish)") \
+    >/dev/null 2>&1 && echo ok || echo rejected)"
+check "an archive matching its checksum is accepted" ok \
+  "$( (verify_archive_checksum "$ARCHDIR/fake.zip" \
+    "$(sha256sum "$ARCHDIR/fake.zip" | awk '{print $1}')") \
+    >/dev/null 2>&1 && echo ok || echo rejected)"
+rm -rf "$ARCHDIR"
+
+# The real archive nests <device>-<build>/image-<device>-<build>.zip. An
+# 'image-*.zip' glob cannot cross that leading directory and matches nothing, so
+# build a fixture with the same layout and run the extraction for real.
+FIXDIR=$(mktemp -d)
+(
+  cd "$FIXDIR" || exit 1
+  mkdir -p sailfish-qp1a.191005.007.a3
+  head -c 2048 /dev/urandom >boot.img
+  zip -q -X inner.zip boot.img
+  mv inner.zip sailfish-qp1a.191005.007.a3/image-sailfish-qp1a.191005.007.a3.zip
+  : >sailfish-qp1a.191005.007.a3/flash-all.sh
+  zip -q -r -X -0 outer.zip sailfish-qp1a.191005.007.a3
+)
+mkdir -p "$FIXDIR/out"
+stock_boot=""
+check "boot.img is extracted from the real nested layout" ok \
+  "$( (extract_boot_from_archive "$FIXDIR/outer.zip" "$FIXDIR/out") >/dev/null 2>&1 && echo ok || echo failed)"
+check "the extracted boot.img is the one inside the archive" yes \
+  "$([[ -f $FIXDIR/out/boot.img ]] && cmp -s "$FIXDIR/boot.img" "$FIXDIR/out/boot.img" && echo yes || echo no)"
+check "the gigabyte inner archive is not left behind" yes \
+  "$([[ -z $(find "$FIXDIR/out" -name 'image-*.zip' -print -quit) ]] && echo yes || echo no)"
+rm -rf "$FIXDIR"
+
+check "an archive of the wrong size is rejected before hashing" rejected \
+  "$( (
+    tmp=$(mktemp)
+    head -c 16 /dev/zero >"$tmp"
+    verify_archive_size "$tmp" "$(factory_size sailfish)"
+  ) >/dev/null 2>&1 && echo ok || echo rejected)"
+check "an archive of the pinned size passes the size gate" ok \
+  "$( (
+    tmp=$(mktemp)
+    head -c 16 /dev/zero >"$tmp"
+    verify_archive_size "$tmp" 16
+  ) >/dev/null 2>&1 && echo ok || echo rejected)"
+
+# ------------------------------------------------------- Magisk app provenance
+# Step 3 of Phase 0 factory-resets the phone, so the Magisk app is gone. Nothing
+# downstream works until it is back, and it must be the validated version from
+# the official release, authenticated by its signing certificate.
+# The MAGISK_* constants are readonly and already in scope: the eval above
+# spans them. Re-evaluating here would abort on the readonly reassignment.
+check "the Magisk app is fetched from the official release" yes \
+  "$([[ $MAGISK_APK_URL == https://github.com/topjohnwu/Magisk/releases/download/* ]] && echo yes || echo no)"
+check "the pinned app URL names the pinned version" yes \
+  "$([[ $MAGISK_APK_URL == *"/v$MAGISK_VERSION/Magisk-v$MAGISK_VERSION.apk" ]] && echo yes || echo no)"
+check "the app checksum is a SHA-256" yes \
+  "$([[ $MAGISK_APK_SHA256 =~ ^[0-9a-f]{64}$ ]] && echo yes || echo no)"
+check "the signing certificate is pinned" yes \
+  "$([[ $MAGISK_APK_CERT_SHA256 =~ ^([0-9A-F]{2}:){31}[0-9A-F]{2}$ ]] && echo yes || echo no)"
+check "the app package is Magisk's" com.topjohnwu.magisk "$MAGISK_PACKAGE"
+# The runbook records which version was proven on hardware. A pin that drifts
+# from that record is either an unvalidated upgrade or a stale doc.
+check "the pinned version matches the hardware-validated one" yes \
+  "$(grep -q "Magisk $MAGISK_VERSION" "$PROJECT_ROOT/docs/ai-agent-runbook.md" && echo yes || echo no)"
+
+# The installer must refuse anything whose signer is not John Wu's certificate,
+# which is what makes this stronger than a self-recorded file hash.
+magisk_src3=$(cat "$SCRIPTS/install-magisk-boot.sh")
+check "the app install is gated on the certificate, not only the hash" yes \
+  "$([[ $magisk_src3 == *'[[ $fingerprint == "$MAGISK_APK_CERT_SHA256" ]] || {'* ]] && echo yes || echo no)"
+check "the installed version is confirmed on the phone after install" yes \
+  "$([[ $magisk_src3 == *'expected Magisk app $MAGISK_VERSION on the phone'* ]] && echo yes || echo no)"
+check "staging installs the app before pushing boot.img" yes \
+  "$(awk '/^  stage\)/,/^  flash\)/' "$SCRIPTS/install-magisk-boot.sh" \
+    | awk '/ensure_magisk_app/{a=NR} /push .*boot\.img/{b=NR} END{print (a && b && a < b) ? "yes" : "no"}')"
+
+# The app must be verified and reinstalled even when the reported version
+# already matches: a package name and versionName are self-declared and say
+# nothing about who signed the app that will patch the boot image.
+eval "$(sed -n '/^ensure_magisk_app()/,/^}/p' "$SCRIPTS/install-magisk-boot.sh")"
+
+APPLOG=""
+INSTALLED_VERSION=""
+installed_magisk_version() { printf '%s\n' "$INSTALLED_VERSION"; }
+verify_archive_size() { printf 'size\n' >>"$APPLOG"; }
+verify_archive_checksum() { printf 'checksum\n' >>"$APPLOG"; }
+verify_apk_signature() {
+  printf 'certificate\n' >>"$APPLOG"
+  printf '%s\n' "$MAGISK_APK_CERT_SHA256"
+}
+adb() {
+  printf 'install\n' >>"$APPLOG"
+  INSTALLED_VERSION=$MAGISK_VERSION
+}
+probe_app() { # $1 = version already on the phone; echoes the steps performed
+  local ws
+  ws=$(mktemp -d)
+  workspace=$ws
+  mkdir -p "$ws/factory"
+  : >"$ws/factory/Magisk-v$MAGISK_VERSION.apk" # present, so no download is tried
+  APPLOG="$ws/log"
+  : >"$APPLOG"
+  INSTALLED_VERSION=$1
+  serial=STUB
+  (ensure_magisk_app) >/dev/null 2>&1 || true
+  tr '\n' ',' <"$APPLOG"
+  rm -rf "$ws"
+}
+
+check "a matching version is still verified and reinstalled" 'size,checksum,certificate,install,' \
+  "$(probe_app "$MAGISK_VERSION")"
+check "an absent app is verified and installed" 'size,checksum,certificate,install,' \
+  "$(probe_app '')"
+check "a different version is verified and replaced" 'size,checksum,certificate,install,' \
+  "$(probe_app '25.2')"
+
+# A wrong signer must stop before anything is installed.
+verify_apk_signature() {
+  printf 'certificate\n' >>"$APPLOG"
+  printf '%s\n' "AA:BB"
+}
+check "a wrong signing certificate stops before install" 'size,checksum,certificate,' \
+  "$(probe_app "$MAGISK_VERSION")"
+verify_apk_signature() {
+  printf 'certificate\n' >>"$APPLOG"
+  printf '%s\n' "$MAGISK_APK_CERT_SHA256"
+}
+unset -f adb installed_magisk_version verify_archive_size verify_archive_checksum verify_apk_signature
+
+# The signature check must be exercised with real cryptography, not a stub. A
+# stubbed extractor cannot tell "this certificate blob is present" apart from
+# "the key owning it actually signed something", which is the distinction an
+# earlier version of this script got wrong.
+eval "$(sed -n '/^verify_apk_signature()/,/^}/p' "$SCRIPTS/install-magisk-boot.sh")"
+
+SIGDIR=$(mktemp -d)
+workspace="$SIGDIR/ws"
+mkdir -p "$workspace/factory"
+(
+  cd "$SIGDIR" || exit 1
+  for who in publisher impostor; do
+    openssl req -x509 -newkey rsa:2048 -keyout "$who.key" -out "$who.crt" \
+      -days 2 -nodes -subj "/CN=$who" >/dev/null 2>&1
+  done
+  mkdir -p apk/META-INF
+  printf 'Manifest-Version: 1.0\r\n\r\nName: payload\r\nSHA-256-Digest: irrelevant\r\n\r\n' \
+    >apk/META-INF/MANIFEST.MF
+  manifest_digest=$(openssl dgst -sha256 -binary apk/META-INF/MANIFEST.MF | openssl base64 -A)
+  printf 'Signature-Version: 1.0\r\nSHA-256-Digest-Manifest: %s\r\n\r\n' "$manifest_digest" \
+    >apk/META-INF/CERT.SF
+  printf 'payload-bytes\n' >apk/payload
+  sign() { # $1 = signer name, $2 = file to sign, $3 = output
+    openssl smime -sign -in "$2" -out "$3" -outform DER \
+      -inkey "$1.key" -signer "$1.crt" -binary -noattr >/dev/null 2>&1
+  }
+  sign publisher apk/META-INF/CERT.SF apk/META-INF/CERT.RSA
+  (cd apk && zip -q -r -X ../good.apk .)
+
+  # Same certificate blob, but the signature was made over different content.
+  cp -r apk bad-sig && printf 'tampered\r\n' >>bad-sig/META-INF/CERT.SF
+  (cd bad-sig && zip -q -r -X ../tampered-sf.apk .)
+
+  # A different key signs its own CERT.SF; the blob is well formed and yields a
+  # fingerprint, but it did not sign this archive's CERT.SF.
+  cp -r apk impostor-apk
+  sign impostor apk/META-INF/CERT.SF impostor-sig.p7
+  cp impostor-sig.p7 impostor-apk/META-INF/CERT.RSA
+  (cd impostor-apk && zip -q -r -X ../impostor.apk .)
+
+  # Valid signature over CERT.SF, but MANIFEST.MF no longer matches its digest.
+  cp -r apk bad-manifest && printf 'Name: sneaked\r\n\r\n' >>bad-manifest/META-INF/MANIFEST.MF
+  (cd bad-manifest && zip -q -r -X ../bad-manifest.apk .)
+)
+publisher_fp=$(openssl x509 -in "$SIGDIR/publisher.crt" -noout -fingerprint -sha256 \
+  | sed 's/^.*Fingerprint=//')
+impostor_fp=$(openssl x509 -in "$SIGDIR/impostor.crt" -noout -fingerprint -sha256 \
+  | sed 's/^.*Fingerprint=//')
+
+check "a genuine signature yields the signer fingerprint" "$publisher_fp" \
+  "$(verify_apk_signature "$SIGDIR/good.apk")"
+check "a tampered CERT.SF is rejected" "" \
+  "$(verify_apk_signature "$SIGDIR/tampered-sf.apk")"
+# A valid signature by the wrong key is still a valid signature. The function's
+# job is to report who signed; refusing that signer is the caller's job, via the
+# pinned fingerprint. Assert both halves rather than conflating them.
+check "another key's valid signature is reported as that key" yes \
+  "$([[ $(verify_apk_signature "$SIGDIR/impostor.apk") == "$impostor_fp" ]] && echo yes || echo no)"
+check "another key never passes as the publisher" yes \
+  "$([[ $(verify_apk_signature "$SIGDIR/impostor.apk") != "$publisher_fp" ]] && echo yes || echo no)"
+check "a manifest that no longer matches its digest is rejected" "" \
+  "$(verify_apk_signature "$SIGDIR/bad-manifest.apk")"
+check "a file that is not an APK is rejected" "" \
+  "$(verify_apk_signature "$SIGDIR/publisher.crt")"
+
+# The chain above stops at MANIFEST.MF: it does not re-hash every entry, and it
+# does not read the v2/v3 signing block Android itself uses. Entry-level
+# tampering is caught by the pinned whole-file checksum, which runs first. Prove
+# that layer rather than claiming the signature check covers it.
+cp "$SIGDIR/good.apk" "$SIGDIR/entry-tampered.apk"
+printf 'evil-bytes\n' >"$SIGDIR/payload"
+(cd "$SIGDIR" && zip -q "entry-tampered.apk" payload)
+check "entry tampering does not break the CERT.SF chain (documented limit)" "$publisher_fp" \
+  "$(verify_apk_signature "$SIGDIR/entry-tampered.apk")"
+check "entry tampering is caught by the pinned checksum instead" rejected \
+  "$( (verify_archive_checksum "$SIGDIR/entry-tampered.apk" \
+    "$(sha256sum "$SIGDIR/good.apk" | awk '{print $1}')") >/dev/null 2>&1 && echo ok || echo rejected)"
+rm -rf "$SIGDIR"
+
+# --------------------------------------------------- rollback slot flexibility
+# The deployment policy is explicit that the bootloader may fail over to the
+# untouched slot after a bad boot, and that recovery must not trust Fastboot's
+# current-slot. Rollback runs exactly then, so requiring the slots to agree
+# would disable recovery in the only case it exists for. The write names
+# boot_<slot> explicitly, so a mismatch cannot reach the safe slot.
+eval "$(sed -n '/^require_fastboot_state()/,/^}/p' "$SCRIPTS/install-magisk-boot.sh")"
+
+FB_PRODUCT=sailfish
+FB_SLOT=b
+FB_UNLOCKED=yes
+fastboot() { printf '%s\tfastboot\n' "$serial"; }
+fastboot_value() {
+  case "$1" in
+    product) printf '%s\n' "$FB_PRODUCT" ;;
+    current-slot) printf '%s\n' "$FB_SLOT" ;;
+    unlocked) printf '%s\n' "$FB_UNLOCKED" ;;
+  esac
+}
+serial=STUB
+device=sailfish
+slot=b
+probe_fb() { (require_fastboot_state "$@") >/dev/null 2>&1 && echo ok || echo rejected; }
+
+FB_SLOT=b
+check "flash accepts a matching current slot" ok "$(probe_fb)"
+check "rollback accepts a matching current slot" ok "$(probe_fb 0)"
+
+FB_SLOT=a # the bootloader failed over to the untouched slot
+check "flash rejects a mismatched current slot" rejected "$(probe_fb)"
+check "rollback proceeds after an A/B failover" ok "$(probe_fb 0)"
+check "rollback reports the failover rather than staying silent" yes \
+  "$( (require_fastboot_state 0) 2>&1 | grep -q "current slot 'a'" && echo yes || echo no)"
+
+FB_SLOT=b
+FB_PRODUCT=marlin
+check "rollback still rejects the wrong product" rejected "$(probe_fb 0)"
+FB_PRODUCT=sailfish
+FB_UNLOCKED=no
+check "rollback still rejects a locked bootloader" rejected "$(probe_fb 0)"
+FB_UNLOCKED=yes
+unset -f fastboot fastboot_value
+
+check "the rollback action relaxes only the slot check" yes \
+  "$(awk '/^  rollback\)/,/^  \*\)/' "$SCRIPTS/install-magisk-boot.sh" \
+    | grep -q 'require_fastboot_state 0' && echo yes || echo no)"
+check "the flash action keeps the strict slot check" yes \
+  "$(awk '/^  flash\)/,/^  rollback\)/' "$SCRIPTS/install-magisk-boot.sh" \
+    | grep -qE 'require_fastboot_state$' && echo yes || echo no)"
+
+# ------------------------------------------------------------- bounded waiting
+# A pending Magisk Grant dialog must not hang the run: an unbounded su bypasses
+# the 180-second limits either side of it and contradicts the "do not touch the
+# phone" rule, which this is the one documented exception to.
+check "the post-flash root check is bounded" yes \
+  "$([[ $magisk_src3 == *'until out=$(timeout 15 adb -s "$serial" shell "su -c $command_arg" 2>/dev/null)'* ]] && echo yes || echo no)"
+check "no unbounded root_cmd id remains after the flash" yes \
+  "$([[ $magisk_src3 != *'[[ $(root_cmd id) =='* ]] && echo yes || echo no)"
+check "the user is told to press Grant before the wait starts" yes \
+  "$(awk '/^wait_for_root\(\)/,/^}/' "$SCRIPTS/install-magisk-boot.sh" \
+    | awk '/press Grant/{a=NR} /until out=/{b=NR} END{print (a && b && a < b) ? "yes" : "no"}')"
+
+# -------------------------------------------------------------- gated rollback
+# The emergency path printed on failure must go through the same gates as the
+# flash, not a raw fastboot write.
+check "a rollback action exists" yes \
+  "$([[ $magisk_src3 == *'  rollback)'* ]] && echo yes || echo no)"
+for gate in 'sha256sum -c stock-boot.img.sha256' \
+  'validate_boot_image "$state_dir/stock-boot.img" "stock rollback image"' \
+  'require_fastboot_state' \
+  'check_fits_partition "$state_dir/stock-boot.img" "stock rollback image"'; do
+  check "rollback re-checks: ${gate:0:46}" yes \
+    "$(awk '/^  rollback\)/,/^  \*\)/' "$SCRIPTS/install-magisk-boot.sh" \
+      | grep -qF "$gate" && echo yes || echo no)"
+done
+check "rollback demands its own token" yes \
+  "$(awk '/^  rollback\)/,/^  \*\)/' "$SCRIPTS/install-magisk-boot.sh" \
+    | grep -q 'confirm_rollback == "\$expected"' && echo yes || echo no)"
+check "the recovery message leads with the gated command" yes \
+  "$(awk '/^print_rollback_command\(\)/,/^}/' "$SCRIPTS/install-magisk-boot.sh" \
+    | awk '/--confirm-rollback/{a=NR} /LAST RESORT ONLY/{b=NR} END{print (a && b && a < b) ? "yes" : "no"}')"
+
+eval "$(sed -n '/^rollback_token()/,/^}/p' "$SCRIPTS/install-magisk-boot.sh")"
+TOKDIR=$(mktemp -d)
+printf 'stock-bytes\n' >"$TOKDIR/img"
+device=sailfish
+slot=b
+tok=$(rollback_token "$TOKDIR/img")
+check "the rollback token is bound to device, slot and image" yes \
+  "$([[ $tok == "ROLLBACK:sailfish:b:$(sha256sum "$TOKDIR/img" | cut -c1-12)" ]] && echo yes || echo no)"
+printf 'different-bytes\n' >"$TOKDIR/img"
+check "a different image yields a different token" yes \
+  "$([[ $(rollback_token "$TOKDIR/img") != "$tok" ]] && echo yes || echo no)"
+rm -rf "$TOKDIR"
+device=sailfish
+
+# ------------------------------------------------------------ host dependencies
+# Phase 0 runs before setup-host-ubuntu-20.04.sh, so the script checks its own
+# tools; setup must also install them for the later phases.
+for dep in curl unzip openssl; do
+  check "install-magisk-boot checks for $dep up front" yes \
+    "$(awk '/^for required_command in/{print; exit}' "$SCRIPTS/install-magisk-boot.sh" \
+      | grep -qw "$dep" && echo yes || echo no)"
+  check "host setup installs $dep" yes \
+    "$(grep -q "^  rsync unzip zip.*\b$dep\b\|^  .*\b$dep\b" <(sed -n '/^packages=(/,/^)/p' \
+      "$SCRIPTS/setup-host-ubuntu-20.04.sh") && echo yes || echo no)"
+done
+
+# There must be no way to hand the script an arbitrary boot image: no published
+# checksum can authenticate one. Exercised through real argument parsing, with a
+# stub adb so nothing reaches a phone. Exit 2 is "unknown option"; the last case
+# proves a supported option still parses, so 2 really means rejected.
+STUBDIR=$(mktemp -d)
+printf '#!/bin/sh\nexit 0\n' >"$STUBDIR/adb"
+chmod +x "$STUBDIR/adb"
+probe_opt() {
+  (PATH="$STUBDIR:$PATH" bash "$SCRIPTS/install-magisk-boot.sh" stage "$@" >/dev/null 2>&1)
+  echo $?
+}
+check "a bare --stock-boot is refused" 2 "$(probe_opt --stock-boot /nonexistent.img)"
+check "--stock-boot-sha256 is refused" 2 "$(probe_opt --stock-boot-sha256 deadbeef)"
+check "--factory-zip-sha256 is refused" 2 "$(probe_opt --factory-zip-sha256 deadbeef)"
+check "a supported option still parses" 1 "$(probe_opt --workspace "$STUBDIR/ws")"
+rm -rf "$STUBDIR"
+
+check "the remote listing survives a clean phone" yes \
+  "$([[ $magisk_src2 == *'done; true'* ]] && echo yes || echo no)"
+check "missing staging evidence fails closed" yes \
+  "$([[ $magisk_src2 == *'no staging record at'* ]] && echo yes || echo no)"
+check "staging records rather than deletes user files" yes \
+  "$([[ $magisk_src2 != *'rm -f /sdcard/Download/magisk_patched-*.img'* &&
+    $magisk_src2 == *pre-existing-patched.txt* ]] && echo yes || echo no)"
+check "the post-flash wait is bounded" yes \
+  "$([[ $magisk_src2 != *'adb -s "$serial" wait-for-device'* &&
+    $magisk_src2 == *'did not return to ADB within 180 seconds'* ]] && echo yes || echo no)"
 
 ((fails == 0)) || {
   printf 'FAIL: %d check(s) failed\n' "$fails" >&2

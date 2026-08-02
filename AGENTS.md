@@ -60,6 +60,7 @@ Assume nothing is inferred. Say exactly which button, exactly when, or say expli
 | Situation | Tell the user |
 |---|---|
 | A script is running | "Do not press anything. The script reboots the phone itself." |
+| `install-magisk-boot.sh flash` reaches the root check | The one exception. "Unlock the screen, and when Magisk asks to grant Superuser access to Shell, press Grant." Bounded at ~3 min, then it fails with instructions. |
 | A failed run stranded the phone at the bootloader | "Press the power button to select Start." |
 | Phone hangs on the Google logo beyond ~60 s | "Hold Power + Volume-Down until it restarts." |
 | A step needs `sudo` | They must run it in a **real terminal**. `sudo` has no TTY in the agent harness or behind the `!` prefix. |

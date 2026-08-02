@@ -14,7 +14,7 @@ fi
 packages=(
   adb fastboot android-sdk-platform-tools-common git build-essential bc
   libssl-dev libelf-dev libncurses5-dev libncursesw5-dev liblz4-tool
-  rsync unzip zip
+  rsync unzip zip curl openssl
 )
 missing=()
 for package in "${packages[@]}"; do
@@ -28,7 +28,7 @@ else
   echo "All required packages are already installed"
 fi
 
-for command_name in adb fastboot git make sha256sum lz4c; do
+for command_name in adb fastboot git make sha256sum lz4c curl unzip openssl; do
   command -v "$command_name" >/dev/null || {
     echo "ERROR: required command is unavailable after setup: $command_name" >&2
     exit 1
