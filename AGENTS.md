@@ -65,6 +65,8 @@ Assume nothing is inferred. Say exactly which button, exactly when, or say expli
 | Phone hangs on the Google logo beyond ~60 s | "Hold Power + Volume-Down until it restarts." |
 | A step needs `sudo` | They must run it in a **real terminal**. `sudo` has no TTY in the agent harness or behind the `!` prefix. |
 | A long build is running | Give the expected duration (~35 min on 4 cores) so they do not interrupt it. |
+| Before any NAS configuration is created or pushed to the phone | Ask the user to enable the intended SMB or NFS service and provide the complete share/export address. For SMB, also ask for the dedicated username and password, capturing the password through a protected file or hidden-input flow rather than command history. Probe that exact target with those credentials from the host, including service reachability, supported protocol version, authenticated read access, and effective write permission. Report the evidence and safety findings before proceeding. An authoritative photo source that accepts writes is a hard stop. |
+| Before installing or changing battery charge limits | Explain that charge limiting is optional and ask whether to enable, keep, change, or disable it. If enabled or changed, ask for the upper/stop and lower/resume percentages; offer 50% and 30% respectively as the defaults. Never infer consent from continuous mains power. |
 
 SELinux commands (`magiskpolicy`, `install-sepolicy-module.sh`) are frequently blocked by harness permission classifiers. Do not work around a denial. Explain what the command does and hand the user a `!` one-liner.
 

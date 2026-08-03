@@ -17,4 +17,8 @@ actual_files=$(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | so
   echo "ERROR: 96-nas-photos.sh must be executable before installation" >&2
   exit 1
 }
+[[ -x 97-battery-charge-control.sh ]] || {
+  echo "ERROR: 97-battery-charge-control.sh must be executable before installation" >&2
+  exit 1
+}
 echo "PASS: companion checksums and manifest coverage"

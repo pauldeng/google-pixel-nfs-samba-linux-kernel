@@ -4,6 +4,8 @@ A custom Linux 3.18 kernel with built-in NFSv3 and CIFS/SMB2 clients for the fir
 
 - Pixel XL (`marlin`) and Pixel (`sailfish`)
 - Android 10 `QP1A.191005.007.A3`
+- Optional, explicit-opt-in native battery charge hysteresis for continuous
+  mains operation (recommended defaults: stop at 50%, resume at 30%)
 - Requires a phone that is **already OEM-unlocked, rooted, and Magisk-patched**. If yours is not, the [runbook](docs/ai-agent-runbook.md) has the procedure, and an AI agent should walk you through it. Unlocking the bootloader **erases the phone**, so do it before you put anything on it.
 
 Verified on hardware: kernel flashed, NAS mounted read-only over SMB 3.0, mount surviving reboots and network loss, photo uploaded at original quality. See [validation status](docs/validation-status.md) for what is proven versus assumed.
@@ -18,6 +20,7 @@ Verified on hardware: kernel flashed, NAS mounted read-only over SMB 3.0, mount 
 | [Quick start](docs/quick-start.md) | Host setup, build, device workflow, NAS testing |
 | [Validation status](docs/validation-status.md) | Proven on hardware versus still unproven |
 | [Reliability qualification](docs/reliability-test-plan.md) | Ordered reboot, NAS, Wi-Fi, MediaStore, power-cycle, and overnight tests |
+| [Battery charge control](docs/battery-charge-control.md) | Native charge thresholds, installation, verification, and recovery |
 | [Device identification](docs/device-identification.md) | Confirming the model and unlockability |
 | [Repository layout](docs/repository-layout.md) | Where everything lives |
 | [Development](docs/development.md) | Formatting, linting, and the `make check` gate |
@@ -37,6 +40,10 @@ The agent needs to be able to:
 You should expect it to:
 
 - Tell you **exactly when to press a button on the phone, and when not to touch it**
+- Ask for the enabled service and complete NAS folder address, probe it from the
+  host, and report permissions before configuring the phone
+- Ask whether optional battery limits are wanted and which upper/lower values to
+  use, offering 50%/30% as defaults rather than assuming consent
 - Never invent a flash or rollback token
 - Verify with evidence you can check, rather than asserting success
 

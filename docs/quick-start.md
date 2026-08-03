@@ -88,6 +88,26 @@ Permanent flash and rollback are intentionally not abbreviated here. Follow Sect
 
 ## NAS testing
 
+Stop before copying or editing a phone configuration. Ask the operator to enable
+the intended SMB/NFS service and provide the complete folder address, including
+the share plus subdirectory for SMB or the full export for NFS. Also establish
+whether this is the authoritative read-only photo source or a separate
+read/write staging share. For SMB, ask explicitly for its dedicated username
+and password; capture the password in a mode-`0600` file or hidden-input flow,
+not in shell history. NFS normally authorizes the client IP/export instead.
+
+Probe that exact target from the Ubuntu host first, using the supplied SMB
+username and password when applicable. Require compatible SMB 3.0/3.02 or NFSv3
+service, authenticated listing and reading, a uniquely named write-permission
+probe, and denial of unrelated shares. Report the results to the operator
+before proceeding. The authoritative photo source must reject the write at the
+NAS; if it accepts it, warn the operator and stop until the NAS ACL or export is
+made read-only. A writable staging share must be separate, contain no sole
+archive copy, and have tested recovery. Only after this gate passes may the
+tested address and credentials be placed in the phone's external operator
+configuration. See Phase 6 of the [runbook](ai-agent-runbook.md) for the complete
+gate.
+
 The production baseline is a read-only photo source. SMB requires a numeric IPv4 address, a dedicated non-administrator reader account, and a NAS that accepts SMB 3.0/3.02 without requiring SMB 3.1.1 or transport encryption. NFSv3 requires a numeric source address and the explicit `addr=<NAS_IP>` option supplied by the mount script.
 
 Copy an example configuration outside the integrity-covered companion files, edit it, and run the manual test wrapper:
@@ -133,3 +153,29 @@ For the Google Photos path, install the photo-share service instead:
 That mounts the share read-only where Photos can see it and keeps MediaStore informed; it copies nothing to internal flash. It requires user 0 to be unlocked at installation time and refuses any configured screen lock, because credential-encrypted storage would otherwise stay unavailable after an unattended reboot. It also refuses if `90-nas-mount.sh` targets the same share, because two mounts of one share cannot both succeed. Configuration, credential, and service replacements are checksum-verified before atomic activation. See [`safety-model.md`](safety-model.md) for why.
 
 `90-nas-mount.sh` below remains for a *different* share — in particular the isolated read/write case — mounting to a root-only path outside app-visible storage. Install a persistent Magisk service only after the corresponding manual test passes. The service uses a bounded TCP connection check against port 445 for SMB or 2049 for NFS, so NAS appliances that intentionally reject ICMP remain supported. After reboot, run `./verify-nas-service.sh`; it compares the mount from independent `su -mm` and plain `su` shells launched through adb instead of accepting only the service's own view. A pass establishes host-shell visibility only—it does not inspect Google Photos or any other app namespace.
+
+## Optional battery charge limits
+
+Do not install this automatically. On every deployment or resumed deployment,
+ask whether the operator wants charge limiting. If it is already installed,
+report the current values and ask whether to keep, change, or disable it. For an
+opt-in, ask for the upper/full stop threshold and lower/low resume threshold;
+offer 50% and 30% respectively as the defaults. A decline or no answer means
+skip this section and leave charging unchanged.
+
+The Pixel kernel already provides native charge-start/charge-stop hysteresis;
+no kernel rebuild or polling daemon is required. To configure 30/50 and apply
+it without rebooting after explicit opt-in:
+
+```bash
+cp battery-charge-control.conf.example \
+  ../pixel-nas-operator-config/battery-charge-control.conf
+chmod 0600 ../pixel-nas-operator-config/battery-charge-control.conf
+./install-battery-charge-control.sh --apply-now \
+  ../pixel-nas-operator-config/battery-charge-control.conf
+```
+
+This stops battery charging at the upper threshold but leaves mains input
+enabled. It does not forcibly discharge the phone. Read
+[`battery-charge-control.md`](battery-charge-control.md) before installation,
+and obtain explicit operator approval before testing persistence with a reboot.

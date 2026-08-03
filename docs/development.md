@@ -14,4 +14,9 @@ Run every non-mutating quality and regression check before committing:
 make check
 ```
 
+The regression suite includes the native battery-threshold parser and
+transaction tests under both Bash and Dash. Invalid, duplicate, injected, and
+partially applied configurations must leave the simulated kernel parameters at
+their previous values.
+
 The individual formatting targets are `format-shell`, `check-shell-format`, `format-markdown`, and `check-markdown`; `check-shellcheck` runs static analysis. Policy is stored in `.editorconfig` and `.rumdl.toml`; `shfmt` detects Bash and POSIX dialects from each script's shebang. GitHub Actions runs `make check` whenever Markdown, shell scripts, tests, or quality configuration changes.

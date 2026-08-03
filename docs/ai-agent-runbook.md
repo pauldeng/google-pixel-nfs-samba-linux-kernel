@@ -235,20 +235,89 @@ Verify: `uname -r` contains `-nas1`, root still works, `nfs` and `cifs` in `/pro
 
 ## 9. Phase 6 — NAS discovery
 
-Do this from the Ubuntu host before touching the phone. No credentials needed for protocol probing.
+This phase is a mandatory human and host-side gate. Do not create a phone NAS
+configuration, push a credential, or run a phone mount test until it passes.
 
-Check ports 445, 139, 111, 2049. If `smbclient` is absent and sudo is unavailable, probe SMB dialects with a raw `python3` socket — the decisive question is whether the server accepts **SMB 3.0**, since this kernel maxes at 3.02 and has no transport encryption.
+Ask the operator to:
+
+1. enable the intended SMB or NFS service on the NAS;
+2. provide the **complete folder address**, not just the server IP—for example
+   `\\192.168.0.233\Multimedia\Photo\Google-Photos-Pixel-Stage` for SMB or
+   `192.168.0.233:/export/path` for NFS;
+3. identify whether it is the authoritative read-only photo source or a
+   separate disposable read/write staging area; and
+4. for SMB, provide the dedicated non-administrator **username and password**.
+   Ask for both explicitly, but capture the password through a mode-`0600`
+   credential file or hidden-input procedure—not shell history, process
+   arguments, or a command pasted into a shared transcript. NFS normally uses
+   the client's source IP and export mapping instead, so record that identity
+   rather than inventing a username/password.
+
+If the service is disabled, the full address is missing, or the intended data
+boundary is unclear, stop and ask. Do not infer any of them from an old config.
+
+Probe the exact target from the running Ubuntu host **with the supplied SMB
+username and password** before touching the phone. Separate unauthenticated
+service discovery from authenticated access testing:
+
+1. Confirm the numeric server address and the exact TCP service are reachable:
+   port 445 for SMB, or port 2049 plus portmapper/mountd for NFSv3. ICMP is not
+   an acceptance gate.
+2. Confirm the negotiated/supported client protocol is compatible with the
+   locked phone kernel: SMB 3.0 or 3.02 without mandatory transport encryption,
+   or NFSv3 over TCP. Never fall back to SMB1.
+3. Authenticate to the exact share and subdirectory/export, list it, and read a
+   known disposable file. Compare its checksum when the operator can provide
+   the expected value. Share enumeration alone is not access proof.
+4. Attempt a uniquely named disposable write against the exact target. The
+   authoritative Photos source must reject it server-side. A separately named
+   staging target may accept it, but then prove create, read, append, rename,
+   delete, and recovery. Delete only the unique probe object; if cleanup or
+   recovery fails, stop.
+5. Check that the dedicated account cannot access unrelated shares. For NFS,
+   record that a host probe may not reproduce an export rule bound specifically
+   to the Pixel's IP, so the later phone test is still mandatory.
+
+Check ports 445, 139, 111, 2049. If `smbclient` is absent and sudo is unavailable, probe SMB dialects with a raw `python3` socket — the decisive question is whether the server accepts **SMB 3.0**, since this kernel maxes at 3.02 and has no transport encryption. A raw protocol response does not prove share access or permissions.
 
 For NFS, query mountd's real TCP port from portmapper, not 2049. An empty export list with `accept_stat=0` means genuinely no exports configured.
 
-With `smbclient`, keep credentials out of `ps` by using an auth file:
+With `smbclient`, ask the operator to enter both values in a real terminal and
+keep the password out of history and `ps` by using hidden input plus a protected
+auth file:
 
 ```bash
-umask 077; printf 'username = %s\npassword = %s\n' USER PASS > auth
-smbclient -L //NAS -A auth
+mkdir -p ../pixel-nas-operator-config
+read -r -p 'SMB username: ' pixel_nas_smb_user
+read -r -s -p 'SMB password: ' pixel_nas_smb_password
+printf '\n'
+umask 077
+printf 'username = %s\npassword = %s\n' \
+  "$pixel_nas_smb_user" "$pixel_nas_smb_password" \
+  >../pixel-nas-operator-config/host-smb.auth
+unset pixel_nas_smb_password
+smbclient -L //NAS -A ../pixel-nas-operator-config/host-smb.auth
 ```
 
-**Share enumeration is not access.** Test each share with `-c ls` and confirm denials on the ones that should be denied. Test write refusal explicitly with `put`.
+The agent must explicitly request the username and password before this probe;
+the protected/hidden entry method changes how the secret is delivered, not
+whether it is requested. Keep the auth file mode `0600` in the gitignored
+operator directory and never copy that combined host auth file to the phone.
+
+**Share enumeration is not access.** Test the exact share/path with `-c ls`,
+confirm denials on unrelated shares, and test write refusal explicitly with a
+uniquely named `put` probe.
+
+Before proceeding, report the findings to the operator: full address, reachable
+service, protocol/dialect, authenticated listing/read result, write result,
+unrelated-share exposure, cleanup/recovery result, and recommendation. Warn and
+stop if an authoritative source is writable, an administrator or broadly
+privileged account is being used, SMB requires a dialect this kernel cannot
+support, transport encryption is mandatory, the exact path cannot be read, or
+permission evidence is inconclusive. Host success is a prerequisite, not a
+substitute for the isolated phone probe in Phase 7. Only after this report is
+accepted may the same tested target, username, and password be written to the
+external operator configuration used for the phone.
 
 ## 10. Phase 7 — mount, and the rule that makes it usable
 
@@ -385,3 +454,39 @@ USB device to VMware after each reboot. Complete the non-reboot NAS/Wi-Fi fault
 tests next, then run the powered overnight continuity/thermal soak. The
 supported appliance is continuously mains-powered; do not add an unpowered
 natural-Doze gate.
+
+## 14. Optional native battery charge limits
+
+This phase is optional and requires a fresh operator decision on every
+deployment or resumed deployment. Before installing or changing anything, ask:
+
+1. whether charge limiting should be enabled at all; and
+2. if yes, what upper/full (stop-charging) and lower/low (resume-charging)
+   percentages to use.
+
+Offer **50% upper/stop and 30% lower/resume as the defaults**. If the operator
+declines or does not answer, skip this phase and leave the existing charging
+configuration unchanged. If limits are already installed, detect and report
+them, then ask whether to keep, change, or disable them; never silently
+reinstall the defaults.
+
+For a continuously powered Pixel, use the kernel's dedicated HTC
+`charge_start_level` and `charge_stop_level` parameters. Do not build a polling
+loop around the generic `charging_enabled` property and do not force external
+input off merely to discharge the battery. The native algorithm disables only
+battery charging and composes with the OEM thermal and charger-safety reasons.
+
+Follow [`battery-charge-control.md`](battery-charge-control.md). After explicit
+opt-in and threshold selection, the default 30/50 installation is:
+
+```bash
+cp Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/battery-charge-control.conf.example \
+  pixel-nas-operator-config/battery-charge-control.conf
+chmod 0600 pixel-nas-operator-config/battery-charge-control.conf
+Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/install-battery-charge-control.sh \
+  --apply-now pixel-nas-operator-config/battery-charge-control.conf
+```
+
+This does not require a reboot. The service is one-shot and exits after the
+kernel parameters read back correctly. Ask for explicit approval before the
+reboot-persistence test.

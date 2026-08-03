@@ -178,6 +178,17 @@ Google groups the first-generation Pixel family under the marlin kernel source l
 
 ## 2.3 NAS prerequisites
 
+Before configuring the phone, explicitly ask the operator to enable the chosen
+NAS service and provide the complete SMB folder address or NFS export address.
+An address is incomplete if it contains only a server name/IP or share name
+without the intended subdirectory/export. For SMB, also ask explicitly for the
+dedicated username and password; capture the password through a protected
+credential file or hidden-input flow. Probe the exact target with those
+credentials from the Ubuntu host first and report the observed reachability,
+protocol version, authenticated read access, effective write permission, and
+access to unrelated shares. Phone configuration is prohibited until the
+operator has seen those findings and every item below is satisfied.
+
 **[ ]** NAS and Pixel are on a trusted LAN or isolated VLAN; neither NFS nor SMB is exposed directly to the internet.
 
 **[ ]** The Pixel has a DHCP reservation or static LAN address.
@@ -694,6 +705,42 @@ Never give the reader account write access. Never give the writer account access
 
 The NAS must accept SMB 3.0 or 3.02 without requiring SMB 3.1.1 or encrypted transport. Do not reduce the NAS minimum to SMB1. If those compatibility requirements conflict with NAS policy, use NFSv3 on a trusted isolated LAN or stop the project.
 
+### 9.2.1 Mandatory operator input and host preflight
+
+The operator must enable the intended service and supply the complete exact
+target before any phone configuration is created or pushed. Record all of:
+
+- the SMB UNC including the share and any subdirectory, or the complete NFS
+  export address;
+- whether the target is the authoritative read-only source or an isolated
+  read/write staging boundary;
+- the selected service/protocol and dedicated identity; for SMB, explicitly ask
+  for both username and password and keep the password in a protected
+  mode-`0600` file or hidden-input flow rather than shell history; and
+- the expected permission model and, for a writable target, its tested recovery
+  mechanism.
+
+From the Ubuntu host, probe the exact target—not merely the server or share
+list—for TCP service reachability, SMB 3.0/3.02 or NFSv3 compatibility,
+authenticated listing and reading, and effective writing. Use a uniquely named
+disposable object for the write probe and remove only that object. An
+authoritative source must reject the write at the server; client-side `ro`
+alone is not proof. A staging share that accepts the write must also pass the
+full disposable write and recovery probe. Confirm the identity cannot access
+unrelated shares. NFS rules tied to the Pixel's source IP must be re-proven from
+the phone because the host has a different source identity.
+
+Report the full target, reachability, negotiated/supported version, read result,
+write result, unrelated-share result, cleanup/recovery result, and any residual
+uncertainty to the operator. Stop before phone setup if the source is writable,
+the account is administrative or over-broad, the dialect is incompatible, the
+service is internet-exposed, or any result is inconclusive. The isolated phone
+test remains mandatory after this host gate. Only after the operator has seen
+and accepted the host findings may the tested address and SMB credentials be
+used to create the phone's external operator configuration. NFS normally uses
+source-IP/export identity instead of a username/password; record and verify that
+mapping rather than fabricating credentials.
+
 ## 9.3 Runtime registration gate
 
 ``` bash
@@ -870,6 +917,38 @@ Replace the final target with `/data/local/tmp/nas-rw` when appropriate. Stop tr
 
 Termux does not grant mount capability. Install it only from an official Termux source compatible with Android 10, run `termux-setup-storage` for convenience links, and use Magisk `su -mm` for every mount/unmount operation. Execute the separated scripts rather than pasting multiline scripts through `adb shell su -c`.
 
+## 9.11 Native battery charge hysteresis
+
+Charge limiting is optional. At each deployment or resumed deployment, ask the
+operator whether to enable it; if it is already present, report the current
+values and ask whether to keep, change, or disable it. Never infer opt-in from
+the phone's mains-powered role. If enabled or changed, ask for the upper/full
+stop percentage and lower/low resume percentage. The recommended defaults are
+50% stop and 30% resume. No answer means leave charging unchanged and skip this
+section.
+
+The locked Pixel kernel exposes HTC's purpose-built
+`/sys/module/htc_battery/parameters/charge_start_level` and
+`charge_stop_level` controls. `is_bounding_fully_charged_level()` maintains the
+configured lower/upper state and contributes one manufacturing charge-disable
+reason to the existing OEM decision. Temperature, USB-overheat, battery,
+charger, and other safety reasons remain in that decision.
+
+Use `97-battery-charge-control.sh` to apply a validated pair once at boot. It
+must never suspend the generic external-input `charging_enabled` control. With
+mains still available, the battery may remain near the upper threshold rather
+than being forced down to the lower threshold; that is the selected
+stability-first behavior. The lower threshold determines when charging may
+resume after natural discharge or a power interruption.
+
+Configuration is external, root-owned mode `0600`, and restricted to integer
+start/stop values with an ordered gap. The installer checksum-verifies and
+atomically activates both files, and an interrupted installation remains
+disabled for the next boot. `--disable` persists a disable marker and restores
+the native `0/100` defaults. See
+[`battery-charge-control.md`](battery-charge-control.md) for operation and the
+required non-reboot and reboot acceptance tests.
+
 # 10. Google Photos integration
 
 ## 10.1 Supported baseline: read-only NAS mounted where Photos can see it
@@ -979,13 +1058,14 @@ Production policy is:
 | 3. Source/build | `build-kernel.sh` | Exact peeled commits/trees, untouched supplied checkouts, Image and Image.lz4-dtb, config, manifest, hashes |
 | 4. Backup/package | `device-deploy.sh prepare` | Device/build/serial/slot match; boot dump; no-op/custom component checks; legacy-SAR patch; size gate |
 | 5. Temporary boot | `device-deploy.sh test` | Branch A: no-op boot and root; custom boot, root, `-nas1`, NFS/CIFS registration. Branch B: recorded bootloader-limitation evidence bound to this exact image |
-| 6. NAS read-only | Reader account/export and `test-nas-mount.sh` | Exact source/type/`ro`; write rejection |
+| 6. NAS host preflight and read-only phone test | Operator-supplied full address; host protocol/access/permission probes; reader account/export; `test-nas-mount.sh` | Findings reported; SMB3.0/3.02 or NFSv3; exact target readable; authoritative source rejects writes server-side and on the phone |
 | 7. Optional NAS write | Separate writer share/export and test | Exact source/type/`rw`; full disposable write probe; recovery test |
 | 8. Photos baseline | `install-nas-photos.sh`, `96-nas-photos.sh` | Mount visible to apps, MediaStore rows present, real upload at original quality, protective unmount when the NAS is gone |
 | 9. Persistent flash | Exact `device-deploy.sh flash` token | Same tested image/serial/slot; one-slot flash; kernel/root verified |
 | 10. Service | `install-nas-service.sh`, reboot, `verify-nas-service.sh` | Root-owned config/secret; bounded TCP readiness; correct probe; independent global/plain host-shell evidence—not app visibility |
 | 11. Reliability qualification | [`reliability-test-plan.md`](reliability-test-plan.md) | Reboot-first VMware sequence, NAS/Wi-Fi/SMB fault recovery, Android service/indexing resilience, and powered overnight soak |
 | 12. Rollback | Explicit device/slot/serial/token | Checksummed original boot restored to recorded slot |
+| Optional battery limits | Explicit operator opt-in and selected upper/lower values; native controller install | Existing state reported; defaults offered as 50% stop and 30% resume; requested values read back without overriding OEM safety controls |
 
 ## 11.2 Automation rules
 
@@ -1111,8 +1191,11 @@ The executable implementation is deliberately outside this Markdown document:
 | `unmount-nas.sh` | Sync, normal unmount, absence verification |
 | `96-nas-photos.sh` | Photo-share mount into the runtime view plus MediaStore scanning; copies nothing |
 | `install-nas-photos.sh` | Photo-share service and configuration installation |
+| `97-battery-charge-control.sh` | One-shot application of the kernel's native charge-start/stop hysteresis |
+| `install-battery-charge-control.sh` | Atomic charge configuration/service installation and disable recovery |
 | `nas-mount-*.conf.example` | SMB/NFS policy examples |
 | `nas-smb.secret.example` | Non-secret format placeholder |
+| `battery-charge-control.conf.example` | Non-secret native charge threshold example |
 | `SHA256SUMS` | Integrity manifest |
 
 The directory is `Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/`. A ZIP may be produced for transport, but the directory and checksum manifest are the source of truth.

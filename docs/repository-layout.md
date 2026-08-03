@@ -32,6 +32,9 @@ Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/
   unmount-nas.sh
   96-nas-photos.sh
   install-nas-photos.sh
+  97-battery-charge-control.sh
+  install-battery-charge-control.sh
+  battery-charge-control.conf.example
   nas-mount-*.conf.example
   nas-photos.conf.example
   nas-smb.secret.example

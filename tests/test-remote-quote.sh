@@ -14,7 +14,7 @@ eval "set -- su -c $quoted"
   exit 1
 }
 
-consumers=(device-deploy.sh install-nas-service.sh test-nas-mount.sh verify-nas-service.sh)
+consumers=(device-deploy.sh install-battery-charge-control.sh install-nas-service.sh test-nas-mount.sh verify-nas-service.sh)
 for consumer in "${consumers[@]}"; do
   script="$PROJECT_ROOT/Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/$consumer"
   # shellcheck disable=SC2016 # Assert the literal source expression.

@@ -14,6 +14,17 @@ The non-negotiable controls are:
 6. Flash only the recorded active slot, and only after the operator supplies the exact generated token. "Tested" means branch-A temporary-boot evidence, or branch-B bootloader-limitation evidence bound to that exact image; never neither.
 7. Keep authoritative NAS photographs read-only at both the server and client.
 8. Keep SMB/NFS on a trusted isolated LAN or VLAN; never expose either service to the internet.
+9. Before phone NAS configuration, require the operator's complete target
+   address and enabled service; for SMB, explicitly request the dedicated
+   username and password and protect the password from history. Probe that exact
+   account's protocol, read, and write behavior from the host and report the
+   findings before placing the tested values on the phone. A writable
+   authoritative source is a stop.
+10. Treat charge limiting as explicit opt-in on every deployment. Ask for the
+   upper/stop and lower/resume values, offering 50% and 30% as defaults. If
+   enabled, use the HTC kernel's native start/stop parameters. Never
+   repeatedly override OEM charge-enable decisions or suspend mains input to
+   force discharge on an unattended phone.
 
 The scripts do not invent confirmation tokens, reset supplied source checkouts, overwrite an existing rollback image, flash both slots, or run a factory-image installer.
 

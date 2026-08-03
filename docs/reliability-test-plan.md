@@ -63,6 +63,12 @@ than hard-code those counts if the server-side fixture changes.
 
 ## 3. Reboot-required qualification — run first
 
+If native battery charge control is installed, every reboot case must also
+record both HTC module parameters, battery health and temperature,
+`battery_charging_enabled`, and `charging_enabled`. Require the configured
+start/stop pair, and require external input to remain enabled. The one-shot
+service must not remain as a resident process.
+
 ### 3.1 Reboot with NAS and Wi-Fi available
 
 Prerequisites: NAS on, SMB available, phone Wi-Fi connected, mount healthy, and

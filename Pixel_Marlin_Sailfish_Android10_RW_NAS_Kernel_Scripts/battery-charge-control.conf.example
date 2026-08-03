@@ -1,0 +1,5 @@
+# Native HTC battery charge hysteresis. The kernel stops battery charging at
+# CHARGE_STOP_PERCENT and permits it again at CHARGE_START_PERCENT. External
+# input remains available; this configuration never forces battery discharge.
+CHARGE_START_PERCENT=30
+CHARGE_STOP_PERCENT=50

@@ -149,6 +149,60 @@ These non-reboot results validate the latency fix. They do not substitute for
 the reboot-first matrix on the new checksum; repeat that matrix before calling
 this exact service fully qualified.
 
+Native battery charge control was implemented and tested without rebooting on
+2026-08-03. The implementation uses the existing HTC kernel
+`charge_start_level`/`charge_stop_level` algorithm rather than a polling loop or
+the generic external-input suspend control:
+
+- the live sailfish baseline exposed writable numeric native parameters at
+  `0/100`, reported battery health `Good`, temperature 31.5–32.2 °C, and both
+  battery charging and external input enabled;
+- the checksum-verified one-shot service applied `30/50`; the kernel then
+  reported battery charging disabled while external input remained enabled;
+- the installed configuration, service, and log were root-owned at modes
+  `0600`, `0755`, and `0600`; device SHA-256 values matched the host, and no
+  charge-controller process remained;
+- the documented disable path created its protected marker, restored `0/100`,
+  and returned battery charging permission to enabled without changing external
+  input;
+- reinstalling and reapplying `30/50` succeeded; and
+- 13 samples over approximately three minutes held `30/50`, health `Good`,
+  temperature 29.5–33.2 °C, battery charging disabled, external input enabled,
+  zero resident charge-controller processes, NAS service PID `16049`, and all
+  five CIFS views. ADB remained connected throughout.
+
+This proves safe application, read-back, disable/restore, and short-term
+coexistence with the NAS appliance. It does not yet prove a natural decline to
+30%, restart of charging at the lower threshold, or a long-duration thermal
+result. Because mains input deliberately remains active,
+the battery may stay near the upper threshold for a long time; that is safer
+than forcing discharge and must not be misreported as a failed controller.
+
+The operator then explicitly approved one reboot-persistence test. Android and
+root returned normally; at uptime 40 seconds the one-shot service had logged a
+fresh application of `30/50`, both parameters read back exactly, the installed
+hashes and modes still matched, no charge-controller process remained, battery
+charging was disabled, and external input remained enabled. The NAS service
+returned as PID `932` with all five propagated Android storage views. Kernel
+CIFS debug data confirmed those views were one server, one share, and one CIFS
+mount—not five independent NAS connections.
+
+The reboot also reproduced the separate thermal workload behavior. The battery
+sensor initially reported 63.5–63.7 °C/`Overheat` while Photos rose to about
+109% of one CPU core. At the operator's direction Photos was left running. Once
+the operator removed the NAS files, Photos fell to approximately 5–8% CPU and
+the reported battery temperature fell through 61.5, 59.0, 54.2, 49.0, and
+45.5 °C, then remained 35.5–36.2 °C/`Good`. Across the observation the native
+limit kept battery charging disabled without suspending mains input, and the
+NAS service and views remained stable.
+
+Deleting the files directly on the NAS left no files in the mounted directory
+but left 476 image and 36 video MediaStore rows at the measured point. This is
+consistent with the established lack of local inotify events for server-side
+changes. It is a separate indexing-lifecycle gap: the current scanner discovers
+and indexes stable new paths but does not reconcile rows whose remote paths
+were deleted during a scan. Do not interpret those rows as remaining NAS files.
+
 Requires no screen lock, because `/storage/emulated/0` is credential-encrypted.
 
 Still unvalidated. These are open items, not mandatory gates for the parts already proven:
@@ -160,6 +214,10 @@ Still unvalidated. These are open items, not mandatory gates for the parts alrea
 - SMB-service restart while the NAS host remains reachable, specifically the stale-session case;
 - controlled new, replaced, renamed, deleted, and unsupported server-side files;
 - bulk media and interrupted-copy stress qualification;
+- native battery-threshold behavior across a natural lower-bound transition,
+  and a longer powered observation;
+- deterministic reconciliation of stale MediaStore rows after server-side
+  deletion during an active scan;
 - promotion of the provisional powered observation after those short tests pass
   unchanged, followed by longer multi-day observation.
 
