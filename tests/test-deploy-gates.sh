@@ -743,8 +743,13 @@ check "rollback accepts a matching current slot" ok "$(probe_fb 0)"
 FB_SLOT=a # the bootloader failed over to the untouched slot
 check "flash rejects a mismatched current slot" rejected "$(probe_fb)"
 check "rollback proceeds after an A/B failover" ok "$(probe_fb 0)"
+# Capture, then match. Piping a multi-line producer into `grep -q` under
+# pipefail made this check fail intermittently (2 of 15 runs): grep exits on the
+# first match while the producer is still writing, and the pipeline's status
+# then reflects the producer, not the match. A flaky gate is worse than no gate.
+failover_output=$( (require_fastboot_state 0) 2>&1 || true)
 check "rollback reports the failover rather than staying silent" yes \
-  "$( (require_fastboot_state 0) 2>&1 | grep -q "current slot 'a'" && echo yes || echo no)"
+  "$(case $failover_output in *"current slot 'a'"*) echo yes ;; *) echo no ;; esac)"
 
 FB_SLOT=b
 FB_PRODUCT=marlin
@@ -808,6 +813,339 @@ check "a different image yields a different token" yes \
 rm -rf "$TOKDIR"
 device=sailfish
 
+# ------------------------------------------------- NAS photo service decisions
+# The service mounts the share where Photos can see it and keeps MediaStore
+# told about new files. Its two risky decisions are when to tear the mount down
+# and whether to trust a mount it just made.
+eval "$(sed -n '/^probe_service_port()/,/^}/p;/^nas_reachable()/,/^}/p;/^mount_line()/,/^}/p;/^validate_mount()/,/^}/p' \
+  "$SCRIPTS/96-nas-photos.sh")"
+log() { :; }
+sleep() { :; } # the retry loop must not really wait during tests
+
+PROBE_SCRIPT=""
+PROBE_CALLS=0
+probe_service_port() {
+  PROBE_CALLS=$((PROBE_CALLS + 1))
+  case $PROBE_SCRIPT in
+    always-up) return 0 ;;
+    always-down) return 1 ;;
+    up-on-2nd) [[ $PROBE_CALLS -ge 2 ]] ;;
+    up-on-3rd) [[ $PROBE_CALLS -ge 3 ]] ;;
+  esac
+}
+probe_reach() {
+  PROBE_SCRIPT=$1
+  PROBE_CALLS=0
+  UNREACHABLE_CONFIRMATIONS=3
+  nas_reachable && printf 'reachable:%s\n' "$PROBE_CALLS" || printf 'down:%s\n' "$PROBE_CALLS"
+}
+
+check "a reachable NAS costs a single probe" reachable:1 "$(probe_reach always-up)"
+# One failed probe must never tear down a working mount: during development a
+# probe written with an option toybox nc lacks failed every time and unmounted
+# the share out from under an in-flight upload.
+check "a transient failure does not report the NAS down" reachable:2 "$(probe_reach up-on-2nd)"
+check "recovery on the last allowed probe still counts" reachable:3 "$(probe_reach up-on-3rd)"
+check "a genuinely down NAS is confirmed, not assumed" down:3 "$(probe_reach always-down)"
+
+UNREACHABLE_CONFIRMATIONS=1
+PROBE_SCRIPT=up-on-2nd
+PROBE_CALLS=0
+check "one confirmation means no retry at all" down \
+  "$(nas_reachable && echo reachable || echo down)"
+
+# The probe must use the form that works on this device. toybox nc has no -z.
+photo_src=$(cat "$SCRIPTS/96-nas-photos.sh")
+check "the readiness probe does not use the unsupported nc -z" yes \
+  "$([[ $photo_src != *'nc -z'* ]] && echo yes || echo no)"
+check "the probe uses the toybox form proven by the other service" yes \
+  "$([[ $photo_src == *'/system/bin/toybox nc -4 -w 2 -q 1'* ]] && echo yes || echo no)"
+# echo_interval does not exist in 3.18; passing it makes the kernel reject the
+# entire mount with "Unknown mount option".
+check "the mount does not pass echo_interval" yes \
+  "$([[ $photo_src != *'echo_interval'* || $photo_src == *'Do not add echo_interval'* ]] && echo yes || echo no)"
+check "the mount is made in init's namespace so it reaches apps" yes \
+  "$([[ $photo_src == *'nsenter --mount=/proc/1/ns/mnt'* ]] && echo yes || echo no)"
+
+# validate_mount reads /proc/mounts; stub grep so the parsing can be driven.
+RUNTIME_TARGET=/mnt/runtime/write/emulated/0/DCIM/NAS-Live
+SMB_SOURCE=//192.168.0.233/Multimedia/Photo/Google-Photos-Pixel-Stage
+FAKE_MOUNT_LINE=""
+grep() {
+  [[ -n $FAKE_MOUNT_LINE ]] || return 1
+  printf '%s\n' "$FAKE_MOUNT_LINE"
+}
+probe_validate_mount() { validate_mount >/dev/null 2>&1 && echo ok || echo rejected; }
+
+good="$SMB_SOURCE $RUNTIME_TARGET cifs ro,context=u:object_r:media_rw_data_file:s0,nosuid 0 0"
+FAKE_MOUNT_LINE=$good
+check "a correct mount validates" ok "$(probe_validate_mount)"
+FAKE_MOUNT_LINE=""
+check "an absent mount is rejected" rejected "$(probe_validate_mount)"
+FAKE_MOUNT_LINE="//192.168.0.9/Other $RUNTIME_TARGET cifs ro,context=u:object_r:media_rw_data_file:s0 0 0"
+check "a mount from another source is rejected" rejected "$(probe_validate_mount)"
+FAKE_MOUNT_LINE="$SMB_SOURCE $RUNTIME_TARGET cifs rw,context=u:object_r:media_rw_data_file:s0 0 0"
+check "a writable mount is rejected" rejected "$(probe_validate_mount)"
+FAKE_MOUNT_LINE="$SMB_SOURCE $RUNTIME_TARGET cifs ro,nosuid 0 0"
+check "a mount without the media context is rejected" rejected "$(probe_validate_mount)"
+unset -f grep sleep log
+
+# The scanner indexes; it must never copy. That is the whole point of the mount.
+check "the scanner does not copy files" yes \
+  "$(awk '/^scan_new_files\(\)/,/^}/' "$SCRIPTS/96-nas-photos.sh" \
+    | grep -qE '(^|[^_[:alnum:]])(cp|dd|cat|install|rsync)[[:space:]]' && echo no || echo yes)"
+check "the scanner verifies what actually indexed" yes \
+  "$([[ $photo_src == *'landed=$(comm -12 "$work/offered" "$work/after"'* ]] && echo yes || echo no)"
+check "the scan loop runs on the device, not per-file from the host" yes \
+  "$([[ $photo_src == *'while IFS= read -r name'* ]] && echo yes || echo no)"
+check "health polling is independent of the media discovery interval" yes \
+  "$([[ $photo_src == *'sleep "$HEALTH_INTERVAL_SECONDS"'* &&
+    $photo_src == *'next_scan_at=$((scan_finished_at + SCAN_INTERVAL_SECONDS))'* ]] && echo yes || echo no)"
+check "long scans recheck reachability by monotonic time" yes \
+  "$([[ $photo_src == *'next_scan_health_at=$(($(monotonic_seconds) + HEALTH_INTERVAL_SECONDS))'* &&
+    $photo_src == *'NAS became unreachable during media scan'* ]] && echo yes || echo no)"
+check "scanner filesystem and Android calls are bounded" yes \
+  "$([[ $photo_src == *'timeout "$IO_TIMEOUT" stat'* &&
+    $photo_src == *'timeout "$IO_TIMEOUT" content query'* &&
+    $photo_src == *'timeout "$IO_TIMEOUT" am broadcast'* ]] && echo yes || echo no)"
+check "new files must remain stable before and immediately before scanning" yes \
+  "$([[ $photo_src == *'stability_remaining=$FILE_STABILITY_SECONDS'* &&
+    $photo_src == *'NAS became unreachable during media scan'* &&
+    $photo_src == *'current_signature=$(file_signature "$name")'* &&
+    $photo_src == *'if [ "$current_signature" != "$observed_signature" ]'* ]] && echo yes || echo no)"
+
+# --------------------------------------------- one mount per share, enforced
+# CIFS shares a superblock per share and SELinux refuses two mounts of it with
+# different context= settings, so whichever service mounts first wins and the
+# other retries forever. This actually happened: installing the photo service
+# left 90-nas-mount.sh failing every 300s with "Same superblock, different
+# security settings". Both sides must refuse rather than collide.
+mount_src=$(cat "$SCRIPTS/90-nas-mount.sh")
+check "the general mount refuses to fight the photo service for a share" yes \
+  "$([[ $mount_src == *'96-nas-photos.sh already serves'* ]] && echo yes || echo no)"
+check "that guard compares host and share, not just presence" yes \
+  "$([[ $mount_src == *'"$photo_host" = "$this_host"'* && $mount_src == *'"$photo_share" = "$this_share"'* ]] && echo yes || echo no)"
+installer_src=$(cat "$SCRIPTS/install-nas-photos.sh")
+# Refusing merely because the other service exists would block an expressly
+# supported configuration: a separate writer share. Refuse on a real collision
+# -- same host and share -- and say so when it is a different one.
+check "the photo installer refuses only on a genuine share collision" yes \
+  "$([[ $installer_src == *'targets the same share'* &&
+    $installer_src == *'$other_host == "$this_host" && $other_share == "$this_share"'* ]] && echo yes || echo no)"
+check "a different share is allowed, not refused" yes \
+  "$([[ $installer_src == *'That is a different share, so the two do not collide'* ]] && echo yes || echo no)"
+# The mount lives in credential-encrypted storage; with a screen lock the
+# appliance cannot come up unattended after a power cut.
+# RUNNING_UNLOCKED only says the phone is unlocked right now; a PIN-protected
+# phone reports it once someone types the PIN. The installer must separately
+# establish that no credential is configured, or it lets an install succeed and
+# then fail on the next unattended reboot.
+check "the photo installer checks the present unlock state" yes \
+  "$([[ $installer_src == *'RUNNING_UNLOCKED'* ]] && echo yes || echo no)"
+check "the photo installer separately detects a configured screen lock" yes \
+  "$([[ $installer_src == *'locksettings get-disabled'* &&
+    $installer_src == *'does not report an absent screen lock'* ]] && echo yes || echo no)"
+check "the photo installer verifies the staged copy by checksum" yes \
+  "$([[ $installer_src == *'the staged service does not match the repository copy'* ]] && echo yes || echo no)"
+check "the photo installer distinguishes policy activation from a service update" yes \
+  "$([[ $installer_src == *'Updating this service alone'* &&
+    $installer_src == *'in-memory code until the next reboot'* &&
+    $installer_src != *'REBOOT TWICE before judging'* ]] && echo yes || echo no)"
+check "the photo installer pins the on-device secret path" yes \
+  "$([[ $installer_src == *'photo configuration must use SMB_SECRET=/data/adb/nas-smb.secret'* ]] && echo yes || echo no)"
+check "an omitted photo secret requires an existing protected device file" yes \
+  "$([[ $installer_src == *'existing_secret == 0:0:600'* ]] && echo yes || echo no)"
+
+# The service must never act on a mount it did not create: the scan would read a
+# stranger's filesystem and the protective unmount would tear it down.
+photo_src2=$(cat "$SCRIPTS/96-nas-photos.sh")
+check "presence of a mount is not treated as ownership" yes \
+  "$([[ $photo_src2 == *'occupied || return 1'* && $photo_src2 == *'validate_mount quiet'* ]] && echo yes || echo no)"
+check "a foreign occupant is left alone rather than unmounted" yes \
+  "$([[ $photo_src2 == *'occupied by a mount this service did not create'* ]] && echo yes || echo no)"
+check "the service refuses to stack on an existing mount" yes \
+  "$([[ $photo_src2 == *'refusing to stack on it'* ]] && echo yes || echo no)"
+check "a non-CIFS occupant is rejected" yes \
+  "$([[ $photo_src2 == *'a non-CIFS filesystem occupies'* ]] && echo yes || echo no)"
+check "the secret is rejected when empty or comma-bearing" yes \
+  "$([[ $photo_src2 == *"*','* | '')"* ]] && echo yes || echo no)"
+
+# The scan compares file paths, not top-level names: a directory name would
+# never match a nested row and would be rebroadcast forever.
+check "the scan enumerates files recursively, not top-level names" yes \
+  "$([[ $photo_src2 == *'find "$APP_TARGET" -type f'* && $photo_src2 != *'ls -A "$APP_TARGET"'* ]] && echo yes || echo no)"
+check "listed paths are made relative to the mount root" yes \
+  "$([[ $photo_src2 == *'sed "s#^$APP_TARGET/##"'* ]] && echo yes || echo no)"
+# Grepping for the helper's name passes while it is defined but never called.
+# Assert it is invoked from the scan, and exercise the counter for real.
+check "the scan actually records refusals, not just defines the helper" yes \
+  "$(awk '/^scan_new_files\(\)/,/^}/' "$SCRIPTS/96-nas-photos.sh" \
+    | grep -q 'record_refusal "\$stuck"' && echo yes || echo no)"
+check "the scan consults the refusal count before rebroadcasting" yes \
+  "$(awk '/^scan_new_files\(\)/,/^}/' "$SCRIPTS/96-nas-photos.sh" \
+    | grep -q 'refusal_count "\$cand"' && echo yes || echo no)"
+
+# Credentials must not transit shell-readable storage on the way in.
+check "the installer streams the secret instead of pushing it" yes \
+  "$([[ $installer_src == *'cat > /data/adb/.nas-smb.secret.new'* &&
+    $installer_src != *'push "$secret"'* ]] && echo yes || echo no)"
+check "the installer streams the config too" yes \
+  "$([[ $installer_src == *'cat > /data/adb/.nas-photos.conf.new'* ]] && echo yes || echo no)"
+check "local inputs are validated before any device configuration write" yes \
+  "$([[ $(grep -n 'local SMB secret must have mode 0600' "$SCRIPTS/install-nas-photos.sh" | cut -d: -f1) -lt $(grep -n 'Installing configuration' "$SCRIPTS/install-nas-photos.sh" | cut -d: -f1) ]] && echo yes || echo no)"
+check "the config is checksum-verified before atomic activation" yes \
+  "$([[ $installer_src == *'sha256sum /data/adb/.nas-photos.conf.new'* &&
+    $installer_src == *'mv /data/adb/.nas-photos.conf.new /data/adb/nas-photos.conf'* ]] && echo yes || echo no)"
+check "the secret is checksum-verified before atomic activation" yes \
+  "$([[ $installer_src == *'sha256sum /data/adb/.nas-smb.secret.new'* &&
+    $installer_src == *'mv /data/adb/.nas-smb.secret.new /data/adb/nas-smb.secret'* ]] && echo yes || echo no)"
+check "the service is checksum-verified before atomic activation" yes \
+  "$([[ $installer_src == *'sha256sum /data/adb/service.d/.96-nas-photos.sh.new'* &&
+    $installer_src == *'mv /data/adb/service.d/.96-nas-photos.sh.new /data/adb/service.d/96-nas-photos.sh'* ]] && echo yes || echo no)"
+check "a documented example configuration exists" yes \
+  "$([[ -f $SCRIPTS/nas-photos.conf.example ]] && echo yes || echo no)"
+
+# The normative plan must not contradict what ships.
+plan=$(cat "$PROJECT_ROOT/docs/action-plan.md")
+check "the plan no longer calls the direct mount experimental" yes \
+  "$([[ $plan != *'Direct integration is experimental'* &&
+    $plan != *'direct mount remains experimental'* ]] && echo yes || echo no)"
+check "the plan no longer ranks local staging first" yes \
+  "$([[ $plan != *'| 1 | Read-only root NAS mount plus bounded local staging'* ]] && echo yes || echo no)"
+check "the plan states the module carries two rules" yes \
+  "$([[ $plan == *'The module carries two rules'* ]] && echo yes || echo no)"
+check "the validation summary no longer calls the direct mount unexercised" yes \
+  "$([[ $plan != *'direct shared-storage mount and NAS-off boot remain unexercised'* ]] && echo yes || echo no)"
+
+quick_start=$(cat "$PROJECT_ROOT/docs/quick-start.md")
+check "quick start creates the photo configuration it installs" yes \
+  "$([[ $quick_start == *'cp nas-photos.conf.example ../pixel-nas-operator-config/nas-photos.conf'* ]] && echo yes || echo no)"
+check "quick start supplies the photo installer credential" yes \
+  "$([[ $quick_start == *'./install-nas-photos.sh ../pixel-nas-operator-config/nas-photos.conf'*'../pixel-nas-operator-config/nas-smb.secret'* ]] && echo yes || echo no)"
+
+# A mount this run just created and then found invalid must still be removable.
+# The identity check that protects a stranger's mount also matched the broken
+# one, so it was classified as foreign and left covering DCIM, blocking every
+# later retry.
+check "a freshly created invalid mount is force-unmounted" yes \
+  "$(awk '/^mount_share\(\)/,/^}/' "$SCRIPTS/96-nas-photos.sh" \
+    | grep -q 'unmount_share force' && echo yes || echo no)"
+check "force skips the ownership check but still requires an occupant" yes \
+  "$([[ $photo_src2 == *'occupied || return 0'* ]] && echo yes || echo no)"
+check "ordinary cleanup keeps the strict ownership check" yes \
+  "$(awk '/^unmount_share\(\)/,/^}/' "$SCRIPTS/96-nas-photos.sh" \
+    | grep -q 'if \[ -z "\$force" \]' && echo yes || echo no)"
+
+# Inspection must read the namespace the mutations happen in.
+check "mount inspection reads init's mount table" yes \
+  "$([[ $photo_src2 == *'grep -m1 " $RUNTIME_TARGET " /proc/1/mounts'* ]] && echo yes || echo no)"
+check "no lifecycle check reads the service's own /proc/mounts" yes \
+  "$([[ $photo_src2 != *'" /proc/mounts"'* && $photo_src2 != *'$RUNTIME_TARGET " /proc/mounts'* ]] && echo yes || echo no)"
+
+# Mounting over a populated directory hides the operator's own files.
+check "a non-empty target is refused rather than hidden" yes \
+  "$([[ $photo_src2 == *'already contains local files; refusing to mount over and hide them'* ]] && echo yes || echo no)"
+
+# Exercise the mountpoint guard rather than only looking for its message. An
+# inspection error must fail closed, and the command must run through the same
+# namespace helper used for mount and unmount.
+eval "$(sed -n '/^target_is_empty()/,/^}/p' "$SCRIPTS/96-nas-photos.sh")"
+TDIR=$(mktemp -d)
+RUNTIME_TARGET=$TDIR
+IO_TIMEOUT=1
+log() { :; }
+in_global_ns() { "$@"; }
+target_result() {
+  if target_is_empty; then
+    echo 0
+  else
+    echo $?
+  fi
+}
+check "an empty target passes the behavioral guard" 0 "$(target_result)"
+touch "$TDIR/local-photo.jpg"
+check "a populated target fails the behavioral guard" 1 "$(target_result)"
+in_global_ns() { return 124; }
+check "an inspection timeout fails closed" 1 "$(target_result)"
+rm -rf "$TDIR"
+
+# A failed MediaStore query used to be hidden by a pipe to sed. That made every
+# file look absent and eventually added valid media to the permanent refusal
+# list. Exercise the helper's status and assert only delivered broadcasts are
+# eligible to accrue a refusal.
+eval "$(sed -n '/^indexed_paths()/,/^}/p' "$SCRIPTS/96-nas-photos.sh")"
+PHOTO_FOLDER=NAS-Live
+APP_TARGET=/storage/emulated/0/DCIM/NAS-Live
+IO_TIMEOUT=5
+content_stub_dir=$(mktemp -d)
+printf '#!/bin/sh\nexit 23\n' >"$content_stub_dir/content"
+chmod 755 "$content_stub_dir/content"
+original_path=$PATH
+PATH="$content_stub_dir:$PATH"
+indexed_result() {
+  if indexed_paths >/dev/null; then
+    echo 0
+  else
+    echo $?
+  fi
+}
+check "a MediaStore query failure is observable" 1 "$(indexed_result)"
+PATH=$original_path
+rm -rf "$content_stub_dir"
+check "refusals are recorded only for successfully offered paths" yes \
+  "$(awk '/^scan_new_files\(\)/,/^}/' "$SCRIPTS/96-nas-photos.sh" \
+    | grep -q 'comm -23 "\$work/offered" "\$work/after"' && echo yes || echo no)"
+
+# Zero silently disables these guards.
+check "zero is rejected for the guards it would disable" yes \
+  "$([[ $photo_src2 == *'must be at least 1; 0 disables the protection it provides'* ]] && echo yes || echo no)"
+
+# Refusal state keyed by path alone outlived the file it described.
+eval "$(sed -n '/^file_signature()/,/^}/p;/^refusal_count()/,/^}/p;/^record_refusal()/,/^}/p' "$SCRIPTS/96-nas-photos.sh")"
+RDIR=$(mktemp -d)
+APP_TARGET=$RDIR
+REFUSED_PATH=$RDIR/state
+IO_TIMEOUT=5
+printf 'one\n' >"$RDIR/f.jpg"
+check "an unseen file starts at zero" 0 "$(refusal_count f.jpg)"
+record_refusal f.jpg
+record_refusal f.jpg
+check "refusals accumulate for an unchanged file" 2 "$(refusal_count f.jpg)"
+sleep 1
+printf 'replaced-with-different-content\n' >"$RDIR/f.jpg"
+check "replacing the file clears its refusal count" 0 "$(refusal_count f.jpg)"
+record_refusal f.jpg
+check "the replaced file starts counting again" 1 "$(refusal_count f.jpg)"
+printf 'x\n' >"$RDIR/other name.jpg"
+record_refusal 'other name.jpg'
+check "a path containing a space is tracked correctly" 1 "$(refusal_count 'other name.jpg')"
+check "the space-bearing path does not disturb the other" 1 "$(refusal_count f.jpg)"
+rm -rf "$RDIR"
+unset REFUSED_PATH APP_TARGET
+
+# The screen-lock probe must fail closed.
+check "the lock probe accepts only the exact success answer" yes \
+  "$([[ $installer_src == *'[[ $lock_probe != "true" ]]'* ]] && echo yes || echo no)"
+check "the lock probe honours the command's exit status" yes \
+  "$([[ $installer_src == *'|| lock_rc=$?'* && $installer_src == *'((lock_rc != 0))'* ]] && echo yes || echo no)"
+check "the lock probe no longer pipes through head" yes \
+  "$([[ $installer_src != *'locksettings get-disabled 2>&1 | head'* ]] && echo yes || echo no)"
+
+# The removed copy-in path must not be advertised as a fallback.
+check "no rank advertises a copy into shared storage" yes \
+  "$([[ $plan != *'plus an explicit copy into shared storage'* ]] && echo yes || echo no)"
+check "the plan states plainly there is no copy-in fallback" yes \
+  "$([[ $plan == *'There is no copy-in fallback'* ]] && echo yes || echo no)"
+
+# The staging path is gone: it copied NAS files into internal flash, which is
+# the thing the direct mount exists to avoid.
+check "stage-photos.sh is gone from the scripts directory" yes \
+  "$([[ ! -e $SCRIPTS/stage-photos.sh ]] && echo yes || echo no)"
+check "no document still describes the copy-in path" yes \
+  "$(grep -rlq 'stage-photos' "$PROJECT_ROOT/docs" 2>/dev/null && echo no || echo yes)"
+check "the manifest no longer lists the removed script" yes \
+  "$(grep -q 'stage-photos' "$SCRIPTS/SHA256SUMS" && echo no || echo yes)"
+
 # ------------------------------------------------------------ host dependencies
 # Phase 0 runs before setup-host-ubuntu-20.04.sh, so the script checks its own
 # tools; setup must also install them for the later phases.
@@ -819,6 +1157,9 @@ for dep in curl unzip openssl; do
     "$(grep -q "^  rsync unzip zip.*\b$dep\b\|^  .*\b$dep\b" <(sed -n '/^packages=(/,/^)/p' \
       "$SCRIPTS/setup-host-ubuntu-20.04.sh") && echo yes || echo no)"
 done
+check "host setup installs sqlite3 for upload-evidence queries" yes \
+  "$(grep -qw sqlite3 <(sed -n '/^packages=(/,/^)/p' \
+    "$SCRIPTS/setup-host-ubuntu-20.04.sh") && echo yes || echo no)"
 
 # There must be no way to hand the script an arbitrary boot image: no published
 # checksum can authenticate one. Exercised through real argument parsing, with a

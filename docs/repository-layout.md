@@ -9,6 +9,7 @@ docs/
   safety-model.md
   quick-start.md
   validation-status.md
+  reliability-test-plan.md
   device-identification.md
   repository-layout.md
   development.md
@@ -29,10 +30,14 @@ Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/
   check-nas-namespace.sh
   verify-nas-service.sh
   unmount-nas.sh
-  stage-photos.sh
+  96-nas-photos.sh
+  install-nas-photos.sh
   nas-mount-*.conf.example
+  nas-photos.conf.example
   nas-smb.secret.example
   SHA256SUMS
+tools/
+  monitor-nas-photos-soak.sh
 ```
 
 Executable logic is intentionally kept out of the Markdown plan. The plan defines policy, ordering, evidence, and stop conditions; the companion directory contains the implementation.

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install a Magisk module carrying one SELinux rule:
+# Install a Magisk module carrying two narrow SELinux rules:
 #
 #   allow kernel kernel capability net_raw
+#   allow media_rw_data_file media_rw_data_file filesystem associate
 #
 # Android's CONFIG_ANDROID_PARANOID_NETWORK gates socket creation on
 # in_egroup_p(AID_INET) || capable(CAP_NET_RAW) (net/ipv4/af_inet.c). The
@@ -14,9 +15,11 @@ set -euo pipefail
 # is permanently dead while still listed in /proc/mounts. Observed on sailfish
 # as a 3-second retry loop logging "CIFS VFS: Error -13 creating socket".
 #
-# The rule grants one capability to kernel threads only. It does not affect
-# app domains and does not weaken the INTERNET permission, which is what
-# disabling CONFIG_ANDROID_PARANOID_NETWORK would do.
+# The first rule grants one capability to kernel threads only. It does not
+# affect app domains and does not weaken the INTERNET permission, which is what
+# disabling CONFIG_ANDROID_PARANOID_NETWORK would do. The second permits the
+# photo mount's filesystem to carry the existing media_rw_data_file label; it
+# grants no permission directly to an app domain.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=source-lock.env
@@ -26,7 +29,18 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 MODULE_ID=pixel-nas-sepolicy
 MODULE_DIR="/data/adb/modules/$MODULE_ID"
-RULE="allow kernel kernel capability net_raw"
+# Two rules, each derived from an observed AVC denial on this hardware.
+#
+#   net_raw    the in-kernel CIFS client cannot rebuild its socket after a
+#              network interruption without it, so any dropped session leaves
+#              the mount permanently dead.
+#   associate  mounting the photo share with context= fails outright with
+#              "avc: denied { associate } ... tclass=filesystem" because stock
+#              policy has no rule letting media_rw_data_file label a filesystem
+#              of its own type. Without the context the files are 'unlabeled'
+#              and every app, Google Photos included, is denied.
+RULES="allow kernel kernel capability net_raw
+allow media_rw_data_file media_rw_data_file filesystem associate"
 
 mapfile -t serials < <(adb devices | awk '$2=="device" {print $1}')
 ((${#serials[@]} == 1)) || {
@@ -108,9 +122,9 @@ name=Pixel NAS CIFS reconnect policy
 version=v1
 versionCode=1
 author=pixel-nas-kernel-work
-description=Grants CAP_NET_RAW to the kernel domain so the in-kernel CIFS client can rebuild its socket after a network interruption.
+description=Narrow SELinux rules derived from observed AVC denials: CAP_NET_RAW so the in-kernel CIFS client can rebuild its socket after a network interruption, and filesystem associate so the NAS photo share can be mounted with a label apps may read.
 PROP
-printf '%s\n' '$RULE' > $MODULE_DIR/sepolicy.rule
+printf '%s\n' '$RULES' > $MODULE_DIR/sepolicy.rule
 chown -R 0:0 $MODULE_DIR
 chmod 0755 $MODULE_DIR
 chmod 0644 $MODULE_DIR/module.prop $MODULE_DIR/sepolicy.rule
@@ -123,9 +137,13 @@ echo "Installed: $MODULE_DIR"
 root_cmd "cat $MODULE_DIR/sepolicy.rule" | tr -d '\r' | sed 's/^/  rule: /'
 root_cmd "ls -l $MODULE_DIR" | tr -d '\r' | sed 's/^/  /'
 
-installed_rule=$(root_cmd "cat $MODULE_DIR/sepolicy.rule" | tr -d '\r')
-[[ $installed_rule == "$RULE" ]] || {
-  echo "ERROR: installed rule does not match the intended rule" >&2
+installed_rules=$(root_cmd "cat $MODULE_DIR/sepolicy.rule" | tr -d '\r')
+[[ $installed_rules == "$RULES" ]] || {
+  echo "ERROR: installed rules do not match the intended rules" >&2
+  echo "intended:" >&2
+  printf '  %s\n' "$RULES" >&2
+  echo "installed:" >&2
+  printf '  %s\n' "$installed_rules" >&2
   exit 1
 }
 
@@ -149,4 +167,7 @@ echo "  adb shell \"su -c 'dmesg | grep -c \\\"denied { net_raw }\\\"'\""
 echo "  adb shell \"su -c 'dmesg | grep -c \\\"Error -13 creating socket\\\"'\""
 echo
 echo "To apply immediately without rebooting (cleared by any reboot):"
-echo "  adb shell \"su -c '/data/adb/magisk/magiskpolicy --live \\\"$RULE\\\"'\""
+while IFS= read -r rule; do
+  [[ -n $rule ]] || continue
+  echo "  adb shell \"su -c '/data/adb/magisk/magiskpolicy --live \\\"$rule\\\"'\""
+done <<<"$RULES"

@@ -16,7 +16,7 @@ Idempotent Ubuntu 20.04 build, safe boot-image deployment and rollback, read-onl
 
 > **Validation status**
 >
-> The Android build mapping, kernel branch, exact commit and tree, toolchain revisions, Kconfig selections, legacy-SAR Magisk requirement, NFS `addr=` requirement, CIFS dialect ceiling, Android storage-view model, and shell-command quoting risks were checked against the locked source and primary documentation. On 2026-08-01, the separated `build-kernel.sh` was executed end to end against the three local locked repositories; it produced and checksum-verified `Image`, `Image.lz4-dtb`, the resolved/minimised configurations, source lock, and build manifest. Both isolated local import and network-only fresh shallow-clone source-preparation paths were exercised. All companion shell scripts were formatted with pinned `shfmt` v3.13.1, checked with pinned ShellCheck v0.11.0, and reviewed for target validation, source/type/mode checks, explicit flash/rollback tokens, one-slot writes, bounded probe deletion, and secret-file permissions. Repository Markdown was formatted and linted with pinned `rumdl` v0.2.47. On 2026-08-02 the device scripts were executed against a Pixel (sailfish): kernel flashed, NAS mounted read-only over SMB 3.0, mount surviving reboot and network loss, one photo uploaded to Google Photos at original quality. Rollback, NFSv3 against a real export, the direct shared-storage mount and NAS-off boot remain unexercised.
+> The Android build mapping, kernel branch, exact commit and tree, toolchain revisions, Kconfig selections, legacy-SAR Magisk requirement, NFS `addr=` requirement, CIFS dialect ceiling, Android storage-view model, and shell-command quoting risks were checked against the locked source and primary documentation. On 2026-08-01, the separated `build-kernel.sh` was executed end to end against the three local locked repositories; it produced and checksum-verified `Image`, `Image.lz4-dtb`, the resolved/minimised configurations, source lock, and build manifest. Both isolated local import and network-only fresh shallow-clone source-preparation paths were exercised. All companion shell scripts were formatted with pinned `shfmt` v3.13.1, checked with pinned ShellCheck v0.11.0, and reviewed for target validation, source/type/mode checks, explicit flash/rollback tokens, one-slot writes, bounded probe deletion, and secret-file permissions. Repository Markdown was formatted and linted with pinned `rumdl` v0.2.47. On 2026-08-02 the device scripts were executed against a Pixel (sailfish): kernel flashed; a read-only SMB 3.0 share mounted into the Photos runtime view and propagated into app-visible storage; 100 files (5.4 GB) were indexed and uploaded at original quality without copying them to internal flash; reboot re-indexing, NAS-off boot, confirmed-unreachable unmount, and recovery after the NAS returned were exercised. On 2026-08-03 the hardened service completed an 8-hour mains-powered continuity and thermal observation with 97 healthy samples and zero anomalies. That observation remains provisional until the outstanding operator-dependent fault tests pass on the same checksum and configuration. Rollback, NFSv3 against a real export, and longer multi-day operation remain unexercised.
 
 Prepared for a first-generation Google Pixel family device with an unlocked bootloader. The phone described in the request - Pixel XL 128 GB - is marlin. The same plan also supports sailfish through device auto-detection and separate device/slot-specific boot packaging.
 
@@ -36,7 +36,7 @@ Read Sections 1 through 4 before running anything. Sections 5 through 8 form the
 | 7\. Boot packaging and backup           | Dump the active boot slot; prove no-op repack; preserve DTBs/ramdisk; patch legacy SAR |
 | 8\. Temporary test, flash, and rollback | Reversible test first, one-slot flash only, deterministic recovery              |
 | 9\. NAS mounting                        | Read-only ingestion plus isolated SMB3.0/NFSv3 writes, credentials, verification, unmount, and service policy |
-| 10\. Google Photos integration          | Reliable local staging baseline, explicit MediaStore scan, and experimental direct-mount validation |
+| 10\. Google Photos integration          | Read-only mount into the Photos runtime view, periodic MediaStore scanning, and the acceptance criteria that gate it |
 | 11\. Human and AI execution contract    | Checkpoints, expected evidence, stop conditions, and troubleshooting            |
 
 > **Destructive gates**
@@ -55,9 +55,9 @@ The kernel build is reproducible and the network-filesystem capability is delive
 | NAS data boundary | Authoritative photo source exposed read-only; optional dedicated writable staging share is never the only archive copy | Structurally prevents Photos or cleanup actions from deleting source photographs while retaining controlled phone-to-NAS capability |
 | NAS recovery | Snapshots, recycle bin/versioning, or an independent backup before real writes | A writable remote filesystem extends phone-side mistakes to NAS data |
 | Kernel linkage | NFS and CIFS built into the kernel | Avoids module ABI, module loading, signing, and early-boot availability problems |
-| Supported mount location | Root-only `/data/local/tmp/nas-ro` for photo input and `/data/local/tmp/nas-rw` for optional output | Reliable kernel mount locations that do not depend on Android shared-storage view propagation |
-| Google Photos path | Local `/storage/emulated/0/DCIM/NAS-Inbox` populated in bounded batches from the read-only source | Uses the supported local shared-storage/MediaStore path and keeps Photos away from remote write authority |
-| Direct-mount experiment | `/mnt/runtime/{default,read,write}/emulated/0/DCIM/NAS-Inbox`, only after inspecting the exact phone mount table | Android 10 exposes different storage views to different app namespaces; success is not assumed |
+| Supported mount location | Photo source mounted read-only into a `/mnt/runtime` view so it propagates into app namespaces; `/data/local/tmp/nas-rw` root-only for optional output | Google Photos can only read what its own mount namespace resolves; writable output stays outside app-visible storage |
+| Google Photos path | Photos reads the NAS in place at `/storage/emulated/0/DCIM/<folder>`; a periodic scan supplies MediaStore rows | Nothing is copied to internal flash, and the client stays read-only so Photos never holds remote write authority |
+| Screen lock | Must be absent | `/storage/emulated/0` is credential-encrypted; with a lock set the mount cannot be made after a reboot until someone types the PIN, so the appliance is not unattended |
 | Automation | Separate Magisk `service.d` policies: read-only source mount by default; optional root-only writer with an effective-`rw` check and write probe | Late execution with a bounded reachability wait; NAS-off boot remains a physical acceptance test |
 | Deployment | `fastboot boot`, then one-slot flash; branch B where the bootloader refuses to RAM-boot | Reversible acceptance test before persistent change wherever possible; other slot remains untouched |
 | Rollback | Verified dump of the active boot partition | Restores the exact root/ramdisk state that was running before the change |
@@ -84,7 +84,7 @@ Any optional writable NAS staging share needs a separate recovery layer. Before 
 
 **6.** Install a Magisk `service.d` mount only after manual isolated tests succeed. A read-only service must validate `ro` and prove write rejection. A separate writable service must validate `rw` and repeat a disposable create/read/append/rename/delete probe.
 
-**7.** Use root-only NAS plus bounded local staging as the supported Google Photos design. Direct mounting into Android's runtime storage views is experimental and must never be the only documented route to completion.
+**7.** Mount the read-only photo share into a verified Android runtime storage view so Google Photos reads it in place; copy nothing to internal flash. This was an experiment until it was proven on the target device against the criteria in 10.2; those criteria remain the bar for any change to the mount path.
 
 **8.** Use Termux for manual tests and on-demand mount/unmount commands. Termux does not itself grant mount permission: every kernel mount or unmount must run through Magisk `su -mm` so it occurs in the global mount namespace. Keep the Magisk `service.d` method as the preferred unattended daily mode after manual tests pass.
 
@@ -96,7 +96,7 @@ Any optional writable NAS staging share needs a separate recovery layer. Before 
 
 > **Important limitation**
 >
-> A successful root mount and root write do not prove an ordinary Android app can see the same path. Android 10 uses distinct default/read/write storage views and per-app mount namespaces; MediaStore, app permissions, and SELinux remain separate gates. Root-only NAS plus local staging is therefore the baseline, not merely a fallback.
+> A successful root mount and root write do not prove an ordinary Android app can see the same path. Android 10 uses distinct default/read/write storage views and per-app mount namespaces; MediaStore, app permissions, and SELinux remain separate gates. A runtime-view mount is therefore accepted only on app-namespace evidence: a MediaStore row and a real upload, never a root listing.
 
 # 1. Device and platform identification
 
@@ -209,8 +209,8 @@ Google groups the first-generation Pixel family under the marlin kernel source l
 | NAS recovery has not been tested                           | Stop before real files. Establish snapshot/recycle-bin/versioned or independent recovery. |
 | Intended read-only mount accepts a write                    | Stop. Correct both server account/export and client mode before exposing source photos.    |
 | Intended writable mount reports `ro` or the write probe fails | Stop. Correct server ACL/export mapping or client options; do not weaken unrelated access. |
-| Google Photos cannot see a controlled direct-mounted test folder | Use the supported root-only NAS plus local-staging path; do not assume a larger remote library will work. |
-| Unresolved SELinux AVC denials                           | Collect evidence and use local staging. Treat any narrow policy change as a separate audited task; never leave SELinux permissive. |
+| Google Photos cannot see a controlled direct-mounted test folder | Check the mount was made in init's namespace, carries `context=u:object_r:media_rw_data_file:s0`, and has a MediaStore row. There is no copy-in fallback; fix the failing gate. |
+| Unresolved SELinux AVC denials                           | Collect the AVC and derive a narrow rule from it, as done for `net_raw` and `associate`. Treat any policy change as a separate audited task; never leave SELinux permissive. |
 
 # 3. Validated source lock
 
@@ -767,9 +767,9 @@ A filesystem with no applicable Android `fs_use` or `genfscon` entry can receive
 
 This is a candidate label, not a guaranteed fix. Confirm the exact phone policy, inspect the resulting mount/file contexts, and collect AVCs. Do not leave SELinux permissive and do not install broad guessed allow rules.
 
-Android 10 maintains `/mnt/runtime/default`, `/mnt/runtime/read`, and `/mnt/runtime/write`, then binds the appropriate view into each app's private mount namespace. A mount at `/storage/emulated/0/DCIM/NAS-Inbox` in the root/adbd namespace therefore does not establish Google Photos visibility.
+Android 10 maintains `/mnt/runtime/default`, `/mnt/runtime/read`, and `/mnt/runtime/write`, then binds the appropriate view into each app's private mount namespace. A mount made in the root/adbd namespace does not establish Google Photos visibility: that namespace is a *slave* of the runtime peer group, and a slave does not propagate back to its master. A mount made in init's namespace does propagate — measured on this device, `/mnt/runtime/*/emulated` are `shared:12` there while every app namespace holds them as `master:12`. This is why `96-nas-photos.sh` mounts through `nsenter --mount=/proc/1/ns/mnt` rather than mounting directly.
 
-Direct integration is experimental:
+Establishing the mount on a new device, or after any change to the storage stack, means repeating this:
 
 1. Inspect `/proc/mounts`, `/proc/<photos-pid>/mountinfo`, and the Photos permission/storage mode on the exact phone.
 2. Copy a read-only configuration and select only the runtime view proven to back the Photos namespace.
@@ -777,7 +777,7 @@ Direct integration is experimental:
 4. Use read-only NAS credentials/export and `MOUNT_MODE=ro`.
 5. Mount a one-image disposable source, scan it explicitly, and test Photos.
 6. Reboot and repeat before considering service installation.
-7. Stop and return to local staging if visibility, propagation, SELinux, MediaStore, or unmount behavior is inconsistent.
+7. Stop if visibility, propagation, SELinux, MediaStore, or unmount behaviour is inconsistent. Do not reintroduce a copy into internal flash to work around it.
 
 Do not mount the same share blindly over all three runtime views. Do not use a direct read/write Photos mount in production.
 
@@ -799,7 +799,9 @@ avc: denied { net_raw } for comm="cifsd" capability=13
 ./install-sepolicy-module.sh
 ```
 
-The module carries exactly one rule, `allow kernel kernel capability net_raw`. It grants one capability to kernel threads only; app domains are unaffected and `CONFIG_ANDROID_PARANOID_NETWORK` stays enabled, so the `INTERNET` permission remains enforced. Rebuilding the kernel with that option disabled would also fix the reconnect, but it would let every application use the network regardless of its permissions and costs a rebuild, repack and reflash. Prefer the rule.
+The module carries two rules. `allow kernel kernel capability net_raw` grants one capability to kernel threads only; app domains are unaffected and `CONFIG_ANDROID_PARANOID_NETWORK` stays enabled, so the `INTERNET` permission remains enforced. Rebuilding the kernel with that option disabled would also fix the reconnect, but it would let every application use the network regardless of its permissions and costs a rebuild, repack and reflash. Prefer the rule.
+
+The second rule, `allow media_rw_data_file media_rw_data_file filesystem associate`, is required before the photo share can be mounted with `context=`. Without the context its files are `unlabeled` and every app is denied; without the rule the mount is refused outright with `avc: denied { associate } ... tclass=filesystem`. It permits one label to apply to a filesystem of its own type and grants nothing to any app domain.
 
 > **On a file-based-encrypted device the rule applies from the SECOND reboot**
 >
@@ -814,7 +816,7 @@ adb shell "su -c 'dmesg | grep -c \"Error -13 creating socket\"'"
 
 > **Remove other mounting modules**
 >
-> A pre-existing third-party CIFS module such as `multi-mount` duplicates this role and may mount with weaker options. Retire it with `touch /data/adb/modules/<id>/remove` and reboot.
+> A pre-existing third-party CIFS mounting module duplicates this role and may mount with weaker options than the policy above requires. Retire it with `touch /data/adb/modules/<id>/remove` and reboot, then confirm `/data/adb/modules/` holds only this project's modules.
 
 ## 9.9 Persistent Magisk service
 
@@ -847,9 +849,13 @@ After each post-reboot probe succeeds, run the independent namespace check from 
 ./verify-nas-service.sh
 ```
 
-It executes the checker separately through `su -mm` and plain `su` launched from adb, requires the global shell to see the mount, and compares the exact mount entry. This proves only host-shell visibility and is a necessary—not sufficient—condition for the Photos experiment. It does not enter an app namespace or change the direct-mount confidence; `/proc/<photos-pid>/mountinfo` and every Section 10.2 gate remain mandatory. Any runtime-view divergence between the two host shells is a hard failure. For the supported root-only staging targets only, plain-`su` divergence may be accepted explicitly with `--allow-plain-divergence` after proving every consumer uses `su -mm`; the warning is then part of the operational contract.
+It executes the checker separately through `su -mm` and plain `su` launched from adb, requires the global shell to see the mount, and compares the exact mount entry. This proves only host-shell visibility and is a necessary—not sufficient—condition for Photos visibility. It does not enter an app namespace; `/proc/<photos-pid>/mountinfo` and every Section 10.2 gate remain mandatory. Any runtime-view divergence between the two host shells is a hard failure. For the supported root-only staging targets only, plain-`su` divergence may be accepted explicitly with `--allow-plain-divergence` after proving every consumer uses `su -mm`; the warning is then part of the operational contract.
 
-A 2016 phone on Wi-Fi may encounter Doze, sleep, reconnect storms, stale sessions, and battery drain. Keep the appliance powered safely, observe `dumpsys deviceidle` and Wi-Fi behavior over at least one overnight cycle, and add any battery-optimization exemption only as an explicit measured operational decision.
+A 2016 phone on Wi-Fi may encounter sleep transitions, reconnect storms, stale
+sessions, and thermal or battery-health problems even while charging. Keep the
+appliance powered safely and observe `dumpsys deviceidle`, Wi-Fi, charging, and
+temperature over at least one overnight cycle. Battery-powered natural Doze is
+outside the supported continuously mains-powered deployment.
 
 ## 9.10 Clean unmount and Termux operation
 
@@ -866,32 +872,68 @@ Termux does not grant mount capability. Install it only from an official Termux 
 
 # 10. Google Photos integration
 
-## 10.1 Supported baseline: read-only NAS plus bounded local staging
+## 10.1 Supported baseline: read-only NAS mounted where Photos can see it
 
-The supported flow is read-only NAS source → `/data/local/tmp/nas-ro` → explicit bounded checksum-verified copy → `/storage/emulated/0/DCIM/NAS-Inbox` → explicit MediaStore scan → Google Photos device-folder backup.
+Nothing is copied to internal flash. The share is mounted read-only inside a
+`/mnt/runtime` view, which propagates into every app mount namespace, so Google
+Photos reads the files in place from the NAS and uploads them at original
+quality.
 
-This uses internal flash for a bounded temporary batch, so it does not completely eliminate flash writes. It does avoid exposing the remote archive to Photos and is substantially more reliable than assuming a network filesystem mounted in the root namespace will propagate into the app's storage view.
+Installed by `install-nas-photos.sh`; the device service is `96-nas-photos.sh`.
 
-Create a reviewed manifest containing 1–100 relative paths, one per line. Push the manifest and external staging script:
+Three properties of the platform force this shape, each measured on the target
+hardware:
 
-``` bash
-adb push photos-manifest.txt /data/local/tmp/photos-manifest.txt
-adb push stage-photos.sh /data/local/tmp/stage-photos.sh
-adb shell "su -mm -c 'chmod 0700 /data/local/tmp/stage-photos.sh; /data/local/tmp/stage-photos.sh /data/local/tmp/nas-ro /storage/emulated/0/DCIM/NAS-Inbox /data/local/tmp/photos-manifest.txt'"
-```
+- **sdcardfs does not expose mounts made on its lower tree.** A mount at
+  `/data/media/0/DCIM/...` is invisible through `/storage/emulated`, whatever
+  its ownership or label. The mount must go into a `/mnt/runtime` view, made in
+  init's mount namespace; every app namespace is a slave of that peer group.
+- **MediaStore never notices files written on the server.** Its index is fed by
+  inotify, which cannot fire for changes another machine makes to the NAS. The
+  service therefore scans for unindexed files and asks MediaStore to index
+  them. That step indexes only; it copies nothing. A newly visible file must
+  keep the same size and mtime across the configured stability window and pass
+  the same check immediately before its broadcast, so an in-progress
+  server-side copy is not intentionally indexed.
+- **A reboot prunes those rows.** MediaProvider's boot scan runs before the
+  mount exists and deletes rows for what it sees as missing files, so the whole
+  folder is re-indexed on each boot. Photos deduplicates by content, so this
+  costs no re-upload.
 
-The script rejects absolute paths and traversal, refuses local overwrites, checks every copied file, applies `restorecon` when available, and sends Android Q's handled `ACTION_MEDIA_SCANNER_SCAN_FILE` broadcast for every destination. It now captures the command output and requires broadcast-completion evidence instead of discarding failures. A proposed `content call --uri content://media --method scan_file --arg <path>` substitution is not used because Android Q's `MediaProvider` expects a Parcelable URI in `Intent.EXTRA_STREAM`, while the `content` CLI's `--arg` supplies only the method's string argument. The separate physical MediaStore query remains mandatory because broadcast completion is not proof of successful indexing.
+Mounting a network filesystem under `DCIM` has one cost, and it is the reason
+the service also watches reachability: while the share is mounted and the
+server is gone, listing `/storage/emulated/0/DCIM` itself fails, which degrades
+the gallery and every media scan. The service polls reachability independently
+of the slower media-discovery schedule, including by monotonic time during a
+large scan. Filesystem, MediaStore-query, and broadcast calls are individually
+bounded. The service confirms unreachability over several probes and then
+unmounts, so a missing folder replaces a broken `DCIM`, and remounts when the
+NAS returns.
 
-After staging:
+Requirements that follow from this design, all verified on hardware:
 
-1. Verify the local file checksum independently.
-2. Query MediaStore or open a gallery to confirm indexing.
-3. Enable `NAS-Inbox` under Google Photos **Back up device folders**.
-4. Verify the cloud upload completed.
-5. Remove only the local staging copy after upload evidence exists.
-6. Archive/move the NAS source from the server side, not through a broadly writable Photos mount.
+1. **No screen lock.** `/storage/emulated/0` is credential-encrypted. With a
+   lock set, user 0 stays `RUNNING_LOCKED` after every reboot and the mount
+   cannot be made until someone types the PIN, so the appliance is not
+   unattended. This is a deliberate security trade for a LAN-only appliance.
+2. **A narrow SELinux rule.** `context=` mounts need
+   `allow media_rw_data_file media_rw_data_file:filesystem associate`; without
+   the context the files are `unlabeled` and every app is denied. Shipped by
+   `install-sepolicy-module.sh`, and subject to the FBE two-boot delay.
+3. **One mount per share.** CIFS shares a superblock per share and SELinux
+   refuses two mounts of it with different `context=` settings. Do not also
+   mount the same share through `90-nas-mount.sh`.
 
-## 10.2 Direct-mount experiment
+After the service is running:
+
+1. Confirm the mount and the file count through `/storage/emulated/0/DCIM/<folder>`.
+2. Query MediaStore for rows in that bucket.
+3. Enable the folder under Google Photos **Back up device folders**, or **Back
+   up all device folders** if it is not listed.
+4. Verify a real cloud upload completed, at original quality.
+5. Archive or move NAS sources from the server side; the client stays read-only.
+
+## 10.2 Direct-mount acceptance criteria
 
 A direct read-only runtime-view mount may reduce internal-flash copying, but it remains an unsupported experiment until the exact Pixel demonstrates all of the following:
 
@@ -903,7 +945,7 @@ A direct read-only runtime-view mount may reduce internal-flash copying, but it 
 - clean unmount succeeds after stopping Photos;
 - NAS-off and Wi-Fi-loss cases do not hang the appliance.
 
-Failure of any item selects the local-staging baseline. A root listing, ordinary ADB listing, or `/proc/mounts` entry alone is not acceptance evidence.
+Failure of any item means this device cannot serve Photos from the NAS. There is no copy-in fallback: that path was removed deliberately because it wrote every uploaded byte to internal flash. Fix the failing criterion or change the hardware. A root listing, ordinary ADB listing, or `/proc/mounts` entry alone is not acceptance evidence.
 
 ## 10.3 Writable-mount safety
 
@@ -921,8 +963,8 @@ Production policy is:
 
 | **Rank** | **Method** | **Assessment** |
 |---|---|---|
-| 1 | Read-only root NAS mount plus bounded local staging | Supported baseline; best reliability and safety, with bounded internal-flash writes |
-| 2 | Experimental direct read-only mount into the verified Photos runtime view | Potentially avoids staging writes, but requires physical namespace/SELinux/MediaStore proof |
+| 1 | Read-only direct mount into the verified Photos runtime view | Supported baseline; copies nothing to internal flash. Costs a narrow SELinux rule, no screen lock, and a scan cycle per reboot |
+| 2 | Read-only root mount at a root-only path, with no route into shared storage | Diagnostic and read/write use only. It cannot feed Google Photos: nothing indexes it, and the copy-in tooling that once bridged the gap was removed deliberately, so this is not a Photos fallback |
 | 3 | Separate root-only read/write staging mount for explicit phone uploads | Retains requested write capability without granting Photos remote-write access |
 | 4 | Direct read/write mount presented to Photos | Not recommended |
 
@@ -939,10 +981,11 @@ Production policy is:
 | 5. Temporary boot | `device-deploy.sh test` | Branch A: no-op boot and root; custom boot, root, `-nas1`, NFS/CIFS registration. Branch B: recorded bootloader-limitation evidence bound to this exact image |
 | 6. NAS read-only | Reader account/export and `test-nas-mount.sh` | Exact source/type/`ro`; write rejection |
 | 7. Optional NAS write | Separate writer share/export and test | Exact source/type/`rw`; full disposable write probe; recovery test |
-| 8. Photos baseline | `stage-photos.sh` | Copy checksum, explicit MediaStore scan, controlled Photos upload |
+| 8. Photos baseline | `install-nas-photos.sh`, `96-nas-photos.sh` | Mount visible to apps, MediaStore rows present, real upload at original quality, protective unmount when the NAS is gone |
 | 9. Persistent flash | Exact `device-deploy.sh flash` token | Same tested image/serial/slot; one-slot flash; kernel/root verified |
 | 10. Service | `install-nas-service.sh`, reboot, `verify-nas-service.sh` | Root-owned config/secret; bounded TCP readiness; correct probe; independent global/plain host-shell evidence—not app visibility |
-| 11. Rollback | Explicit device/slot/serial/token | Checksummed original boot restored to recorded slot |
+| 11. Reliability qualification | [`reliability-test-plan.md`](reliability-test-plan.md) | Reboot-first VMware sequence, NAS/Wi-Fi/SMB fault recovery, Android service/indexing resilience, and powered overnight soak |
+| 12. Rollback | Explicit device/slot/serial/token | Checksummed original boot restored to recorded slot |
 
 ## 11.2 Automation rules
 
@@ -977,6 +1020,10 @@ Production policy is:
 
 **[ ]** Validate the controlled MediaStore entry and Google Photos upload.
 
+**[ ]** Complete the reboot-first reliability matrix and powered overnight
+soak in
+[`reliability-test-plan.md`](reliability-test-plan.md).
+
 **[ ]** Copy irreplaceable phone-local data before persistent flash.
 
 **[ ]** Supply the exact flash or rollback token only after reviewing recorded evidence.
@@ -1007,7 +1054,8 @@ Production policy is:
 
 **[ ]** A bounded local file is checksummed, explicitly indexed, and uploaded by Photos.
 
-**[ ]** Android boots with NAS unavailable and overnight Wi-Fi/Doze behavior is acceptable.
+**[ ]** Android boots with NAS unavailable and overnight mains-powered Wi-Fi,
+mount, charging, and thermal behavior is acceptable.
 
 **[ ]** Permanent flash writes only the recorded slot, and only with branch-A test evidence or branch-B bootloader-limitation evidence for that exact image.
 
@@ -1025,7 +1073,7 @@ Production policy is:
 | Custom boot loses root | Legacy-SAR patch absent or ramdisk changed | Verify `want_initramfs`, kernel hash, and ramdisk hash; roll back |
 | NFS returns `EINVAL` | Missing/invalid `addr=` | Use numeric NAS IP in source and `addr=` |
 | SMB negotiation fails | NAS requires 3.1.1 or encryption | Permit 3.0/3.02 for isolated client, use NFS, or stop |
-| Root sees files; Photos does not | Runtime view, SELinux, or MediaStore | Use local staging; direct mount remains experimental |
+| Root sees files; Photos does not | The mount was made in a slave namespace, lacks `context=`, or MediaStore has no row | Mount through `nsenter --mount=/proc/1/ns/mnt`, confirm the media context, then check for a MediaStore row |
 | Waiting never indexes remote changes | No local filesystem event | Run explicit scan and verify MediaStore |
 | Read-only mount accepts writes | Server or client is writable | Stop and correct both layers |
 | `rw` mount probe fails | Server ACL/export identity mismatch | Fix dedicated writer boundary; do not use admin/root |
@@ -1061,7 +1109,8 @@ The executable implementation is deliberately outside this Markdown document:
 | `check-nas-namespace.sh` | Device-side mount/namespace evidence collector |
 | `verify-nas-service.sh` | Independent post-reboot global/plain namespace gate |
 | `unmount-nas.sh` | Sync, normal unmount, absence verification |
-| `stage-photos.sh` | Bounded copy and explicit MediaStore scan |
+| `96-nas-photos.sh` | Photo-share mount into the runtime view plus MediaStore scanning; copies nothing |
+| `install-nas-photos.sh` | Photo-share service and configuration installation |
 | `nas-mount-*.conf.example` | SMB/NFS policy examples |
 | `nas-smb.secret.example` | Non-secret format placeholder |
 | `SHA256SUMS` | Integrity manifest |
@@ -1113,8 +1162,8 @@ NAS
   Post-reboot global/plain namespace comparison
 
 PHOTOS
-  Baseline is read-only NAS plus bounded local staging and explicit scan
-  Direct runtime-view mount is read-only and experimental
+  Baseline is a read-only runtime-view mount plus periodic MediaStore scanning
+  Direct runtime-view mount is read-only, and is the supported path once 10.2 passes
   Photos never receives direct NAS write access
 
 IMPLEMENTATION

@@ -12,6 +12,22 @@ fail() {
 }
 
 [ -f "$CONFIG_PATH" ] || fail "configuration is absent: $CONFIG_PATH"
+# One mount per share. CIFS shares a single superblock per share, and SELinux
+# refuses two mounts of it with different context= settings: the second gets
+# "Same superblock, different security settings" and fails on every attempt.
+# 96-nas-photos.sh mounts with a context so Google Photos can read the files,
+# so if it is installed as a boot service this one must not target the same
+# share. Whichever mounts first wins, which makes the failure depend on boot
+# ordering and look intermittent.
+if [ -f /data/adb/service.d/96-nas-photos.sh ] && [ -f /data/adb/nas-photos.conf ]; then
+  photo_host=$(sed -n 's/^NAS_HOST=//p' /data/adb/nas-photos.conf | head -1)
+  photo_share=$(sed -n 's/^SMB_SHARE=//p' /data/adb/nas-photos.conf | head -1)
+  this_host=$(sed -n 's/^NAS_HOST=//p' "$CONFIG_PATH" | head -1)
+  this_share=$(sed -n 's/^SMB_SHARE=//p' "$CONFIG_PATH" | head -1)
+  if [ -n "$photo_host" ] && [ "$photo_host" = "$this_host" ] && [ "$photo_share" = "$this_share" ]; then
+    fail "96-nas-photos.sh already serves //$this_host/$this_share; two mounts of one share cannot both succeed"
+  fi
+fi
 # The installer requires this file to be root-owned mode 0600 before execution.
 # shellcheck disable=SC1090
 . "$CONFIG_PATH"

@@ -42,7 +42,11 @@ Symptoms an agent will actually see, and what they mean.
 | Mount reads `Host is down`, `/proc/mounts` still lists it, `CIFS VFS: Error -13 creating socket` every 3 s | `cifsd` denied `net_raw`, cannot rebuild its socket after the session drops | **Blocking for unattended use.** Install the sepolicy module (§10) |
 | sepolicy module installed but denials continue after one reboot | `/data` is FBE; Magisk stages module rules for the *next* boot | Reboot a second time before judging. See plan 9.8 |
 | Mount absent after a boot where the NAS was down | One-shot service gave up. Fixed: `RETRY_INTERVAL_SECONDS` keeps it trying | Reinstall the service; confirm the key is in `/data/adb/nas-mount.conf` |
-| Google Photos never lists the `NAS-Inbox` device folder | Photos 7.85 does not surface it even with correct MediaStore bucket metadata | Enable **Back up all device folders**. Uploads work regardless. |
+| Google Photos never lists the NAS device folder | Photos 7.85 does not surface it even with correct MediaStore bucket metadata | Enable **Back up all device folders**. Uploads work regardless. |
+| MediaStore has no rows for files added to the NAS | inotify cannot fire for writes another machine makes; Android never learns they exist | Expected. `96-nas-photos.sh` scans for them. It copies nothing. |
+| A large file is copied directly into the watched tree | SMB exposes its path before the copy is complete | Prefer copying into a sibling server-side staging directory and atomically renaming the completed file or directory into the watched tree. The service's stability gate is a safety net, not a transactional server-side upload protocol. |
+| All rows for the NAS folder vanish after a reboot | MediaProvider's boot scan runs before the mount exists and prunes them as missing | Expected. The scanner rebuilds the index; Photos deduplicates, so nothing re-uploads. |
+| `am broadcast` fails with `Failed transaction (2147483646)` | `cmd` passes its stdin fd to system_server, which cannot read a file labelled `adb_data_file` | Redirect the call's stdin from `/dev/null`. |
 
 ## 3. Phase 0 — prerequisites the phone must already meet
 
@@ -284,21 +288,100 @@ Retire any other CIFS module: `touch /data/adb/modules/<id>/remove`, then reboot
 
 ## 11. Phase 8 — Google Photos
 
+Nothing is copied to the phone. `96-nas-photos.sh` mounts the share where Photos
+can see it and keeps MediaStore informed; Photos uploads in place from the NAS.
+Reachability uses a separate short health cadence and is also checked during a
+long media scan. New candidates must remain size/mtime-stable before they are
+offered to MediaStore.
+
 ```bash
-adb shell "su -mm -c '/data/local/tmp/stage-photos.sh /data/local/tmp/nas-ro \
-  /storage/emulated/0/DCIM/NAS-Inbox /data/local/tmp/photos-manifest.txt'"
-adb shell "content query --uri content://media/external/images/media \
-  --projection _id:_data:bucket_display_name --where \"_data LIKE '%NAS-Inbox%'\""
+cd Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts
+cp nas-photos.conf.example ../pixel-nas-operator-config/nas-photos.conf
+chmod 0600 ../pixel-nas-operator-config/nas-photos.conf \
+  ../pixel-nas-operator-config/nas-smb.secret
+# Edit nas-photos.conf, then install both configuration and credential.
+./install-nas-photos.sh ../pixel-nas-operator-config/nas-photos.conf \
+  ../pixel-nas-operator-config/nas-smb.secret
 ```
 
-Tell the user, in these words: **profile picture (top right) → Photos settings → Backup → Back up device folders**.
+The installer validates all local inputs before changing the phone. It streams
+the configuration and secret to root-only `.new` files, checksum-verifies the
+staged configuration, secret, and service, then activates each with an atomic
+rename. Never replace those protected files with an `adb push` to
+`/data/local/tmp`.
 
-`NAS-Inbox` will probably **not** appear in that list, even with correct `bucket_display_name` and `is_pending=0`. Have them enable **Back up all device folders** instead; uploads then work. Confirm the result is **original quality** — that is the entire premise of using this phone, and only a real upload proves it.
+**Prerequisite the user must accept:** the phone must have **no screen lock**.
+`/storage/emulated/0` is credential-encrypted, so with a lock set user 0 stays
+`RUNNING_LOCKED` after every reboot and the mount cannot be made until someone
+types the PIN. Say this plainly; it is a security trade-off, and it is theirs.
+
+The SELinux rule the mount needs ships in `install-sepolicy-module.sh`. On a
+new policy-module install, `/data` FBE means Magisk cannot stage that rule for
+pre-init until the first reboot, so **reboot twice** before judging the policy.
+If the module is already active and only the photo service or configuration
+changed, this two-reboot requirement does not apply; restart exactly one
+service process for a non-reboot check, then repeat the checksum-specific
+reboot matrix when the operator approves it.
+
+Verify, in this order:
+
+```bash
+adb shell "su -c 'grep -c \"NAS-Live cifs\" /proc/mounts'"          # expect 5, one per view
+adb shell 'ls /storage/emulated/0/DCIM/NAS-Live | wc -l'
+adb shell content query --uri content://media/external/images/media \
+  --projection _id --where "\"_data LIKE '%NAS-Live%'\""
+adb shell "su -c 'cat /data/adb/nas-photos.log'"
+```
+
+**Tell the user:** in Google Photos, enable backup for the folder under *Photos
+settings → Backup → Back up device folders*. If it is not listed — Photos 7.85
+often does not list it — enable **Back up all device folders**. Confirm the
+quality setting is **Original**; that is the entire premise of using this phone.
+
+Proof of upload is not "the folder appeared". Stop Photos briefly so its
+database and WAL form a stable snapshot, then stream the snapshot to the host.
+Do not leave the app database in `/data/local/tmp`:
+
+```bash
+adb shell am force-stop com.google.android.apps.photos
+adb exec-out "su -c 'cd /data/data/com.google.android.apps.photos/databases && tar -czf - gphotos0.db*'" >gphotos-db.tar.gz
+mkdir -p gphotos-db
+tar -xzf gphotos-db.tar.gz -C gphotos-db
+sqlite3 gphotos-db/gphotos0.db \
+  'SELECT lm.dedup_key, bis.state, bis.media_key_on_upload
+     FROM local_media AS lm
+     JOIN backup_item_status AS bis USING (dedup_key)
+    WHERE bis.state = 1 AND length(bis.media_key_on_upload) > 0;'
+rm -rf gphotos-db gphotos-db.tar.gz
+adb shell monkey -p com.google.android.apps.photos 1
+```
+
+The query requires host `sqlite3`. A returned row with `state` 1 and a non-empty
+`media_key_on_upload` means the server accepted it. Items with no row but a
+matching `remote_media` entry were deduplicated because that content is already
+in the library — not failures. Corroborate with per-uid transmitted bytes; bytes
+sent close to bytes on the share indicates original quality rather than
+re-encoding.
+
+Expect a full re-index after every reboot: MediaProvider prunes rows for files
+that were not mounted during its boot scan. That costs about a second per file
+at the default pace and triggers no re-upload.
 
 ## 12. State reached on 2026-08-02
 
 Working and persistent across reboots: custom kernel `3.18.137-nas1+` with Magisk root; QNAP subdirectory mounted read-only over SMB 3.0, auto-mounting ~55 s after boot and surviving Wi-Fi teardown; one photo uploaded to Google Photos at original quality.
 
-Also proven: boot with the NAS powered off completes in about 30 seconds, the service fails inside its bounded wait without blocking boot, and leaves no mount behind.
+Also proven: boot with the NAS powered off completes in about 30 seconds, the service fails inside its bounded wait without blocking boot, and leaves no mount behind. The direct mount is proven too: from a clean install and one reboot the phone booted unlocked in 33 s, mounted in 15 s, re-indexed 100 files, and Google Photos uploaded them at original quality with nothing copied to internal flash.
 
-Not yet proven: rollback (image verified and preserved, never exercised); NFSv3 against a real export; the experimental direct-mount into shared storage; long-term Doze behaviour.
+Not yet proven: rollback (image verified and preserved, never exercised); NFSv3 against a real export; long-term mains-powered behaviour with the runtime-view mount in place.
+
+## 13. Reliability qualification
+
+After changing any installed kernel, policy, mount service, mount path, network
+handling, or scanner behavior, execute
+[`reliability-test-plan.md`](reliability-test-plan.md). Its reboot-required group
+runs first because this environment requires the operator to reconnect the Pixel
+USB device to VMware after each reboot. Complete the non-reboot NAS/Wi-Fi fault
+tests next, then run the powered overnight continuity/thermal soak. The
+supported appliance is continuously mains-powered; do not add an unpowered
+natural-Doze gate.

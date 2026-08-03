@@ -19,6 +19,7 @@
 **/nas-mount.conf
 **/nas-smb.secret
 **/pixel-nas-mount-test-*.log
+**/pixel-nas-soak-*.log
 
 # Optional transport bundle generated from the integrity-covered directory.
 /Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts.zip

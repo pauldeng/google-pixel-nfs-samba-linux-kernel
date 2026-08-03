@@ -13,4 +13,8 @@ actual_files=$(find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | so
   diff -u <(printf '%s\n' "$manifest_files") <(printf '%s\n' "$actual_files") >&2 || true
   exit 1
 }
+[[ -x 96-nas-photos.sh ]] || {
+  echo "ERROR: 96-nas-photos.sh must be executable before installation" >&2
+  exit 1
+}
 echo "PASS: companion checksums and manifest coverage"

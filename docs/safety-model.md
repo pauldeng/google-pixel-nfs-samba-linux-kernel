@@ -23,15 +23,23 @@ The supported Google Photos design is:
 
 ```text
 read-only NAS source
-        ↓
-/data/local/tmp/nas-ro
-        ↓  bounded, checksum-verified copy
-/storage/emulated/0/DCIM/NAS-Inbox
-        ↓  explicit MediaStore scan
+  mounted read-only into a /mnt/runtime view, in init's mount namespace
+/storage/emulated/0/DCIM/<folder>      propagates into every app namespace
+  a periodic scan tells MediaStore the files exist; nothing is copied
 Google Photos device-folder backup
 ```
 
-Directly mounting a NAS share into Android's `/mnt/runtime/*` storage views is experimental. Android 10 uses per-app mount namespaces, separate storage views, SELinux, and MediaStore; a mount visible to root is not necessarily visible to Google Photos.
+Nothing is copied to internal flash. Photos reads each file in place from the NAS and uploads it at original quality. Installed by `install-nas-photos.sh`; the device service is `96-nas-photos.sh`.
+
+Mounting into a runtime view rather than under `/data/media` is not a preference: sdcardfs does not expose mounts made on its lower tree, so a mount there is invisible to apps whatever its ownership or label. A mount visible to root is still not necessarily visible to Google Photos — the acceptance evidence is a MediaStore row plus a real upload, never a `/proc/mounts` entry.
+
+Three consequences are load-bearing, and each is a safety property rather than a detail:
+
+- **One mount per share.** CIFS shares a single superblock per share and SELinux refuses two mounts of it with different `context=` settings, so a second mount of the same share fails on every attempt. `90-nas-mount.sh` and `96-nas-photos.sh` each refuse rather than compete; do not point both at one share.
+- **The share is unmounted when the NAS goes away.** While it is mounted under `DCIM` and the server is unreachable, listing `/storage/emulated/0/DCIM` itself fails, degrading the gallery and every media scan. The service confirms unreachability over several probes, unmounts, and remounts when the NAS returns. A missing folder is a smaller failure than a broken `DCIM`.
+- **No screen lock.** `/storage/emulated/0` is credential-encrypted; with a lock set, user 0 stays `RUNNING_LOCKED` after every reboot and the mount cannot be made until someone types the PIN. This is a deliberate trade for an unattended LAN-only appliance and must be stated to the operator, not assumed.
+
+`90-nas-mount.sh` remains available for a separate share — in particular the isolated read/write case — mounting to a root-only path outside app-visible storage.
 
 If phone-to-NAS writes are genuinely required, use a different root-only mount, NAS share, and least-privilege writer identity. Never give Google Photos write access to the authoritative NAS archive.
 

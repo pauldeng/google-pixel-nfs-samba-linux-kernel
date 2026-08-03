@@ -17,6 +17,7 @@ Verified on hardware: kernel flashed, NAS mounted read-only over SMB 3.0, mount 
 | [Safety model](docs/safety-model.md) | Non-negotiable controls and the recommended data flow |
 | [Quick start](docs/quick-start.md) | Host setup, build, device workflow, NAS testing |
 | [Validation status](docs/validation-status.md) | Proven on hardware versus still unproven |
+| [Reliability qualification](docs/reliability-test-plan.md) | Ordered reboot, NAS, Wi-Fi, MediaStore, power-cycle, and overnight tests |
 | [Device identification](docs/device-identification.md) | Confirming the model and unlockability |
 | [Repository layout](docs/repository-layout.md) | Where everything lives |
 | [Development](docs/development.md) | Formatting, linting, and the `make check` gate |

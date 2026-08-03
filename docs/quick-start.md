@@ -95,8 +95,10 @@ Copy an example configuration outside the integrity-covered companion files, edi
 ```bash
 mkdir -p ../pixel-nas-operator-config
 cp nas-mount-smb-ro.conf.example ../pixel-nas-operator-config/nas-mount.conf
+cp nas-photos.conf.example ../pixel-nas-operator-config/nas-photos.conf
 cp nas-smb.secret.example ../pixel-nas-operator-config/nas-smb.secret
 chmod 0600 ../pixel-nas-operator-config/nas-mount.conf \
+  ../pixel-nas-operator-config/nas-photos.conf \
   ../pixel-nas-operator-config/nas-smb.secret
 
 # Edit the copied configuration and replace the placeholder secret securely.
@@ -113,6 +115,21 @@ Before installing the persistent service, install the SELinux module:
 ./install-sepolicy-module.sh
 ```
 
-It carries one rule, `allow kernel kernel capability net_raw`. Without it the in-kernel CIFS client cannot rebuild its socket after a network interruption: the session drops during doze, `cifsd` is denied `net_raw`, and the mount stays listed in `/proc/mounts` while every read returns `Host is down`. On a file-based-encrypted device Magisk stages module rules for the *next* boot, so allow **two reboots** before judging whether it worked.
+It carries two rules, each derived from an AVC denial observed on this hardware.
 
-Install a persistent Magisk service only after the corresponding manual test passes. The service uses a bounded TCP connection check against port 445 for SMB or 2049 for NFS, so NAS appliances that intentionally reject ICMP remain supported. After reboot, run `./verify-nas-service.sh`; it compares the mount from independent `su -mm` and plain `su` shells launched through adb instead of accepting only the service's own view. A pass establishes host-shell visibility only—it does not inspect Google Photos or any other app namespace.
+`allow kernel kernel capability net_raw` — without it the in-kernel CIFS client cannot rebuild its socket after a network interruption: the session drops during doze, `cifsd` is denied `net_raw`, and the mount stays listed in `/proc/mounts` while every read returns `Host is down`.
+
+`allow media_rw_data_file media_rw_data_file filesystem associate` — without it the photo-share mount is rejected outright, because a `context=` mount needs permission for that label to apply to a filesystem of its own type. Without the context the files are `unlabeled` and every app, Google Photos included, is denied.
+
+On a file-based-encrypted device Magisk stages module rules for the *next* boot, so allow **two reboots** before judging whether it worked. The first boot after installing will fail, and that is expected rather than a fault.
+
+For the Google Photos path, install the photo-share service instead:
+
+```bash
+./install-nas-photos.sh ../pixel-nas-operator-config/nas-photos.conf \
+  ../pixel-nas-operator-config/nas-smb.secret
+```
+
+That mounts the share read-only where Photos can see it and keeps MediaStore informed; it copies nothing to internal flash. It requires user 0 to be unlocked at installation time and refuses any configured screen lock, because credential-encrypted storage would otherwise stay unavailable after an unattended reboot. It also refuses if `90-nas-mount.sh` targets the same share, because two mounts of one share cannot both succeed. Configuration, credential, and service replacements are checksum-verified before atomic activation. See [`safety-model.md`](safety-model.md) for why.
+
+`90-nas-mount.sh` below remains for a *different* share — in particular the isolated read/write case — mounting to a root-only path outside app-visible storage. Install a persistent Magisk service only after the corresponding manual test passes. The service uses a bounded TCP connection check against port 445 for SMB or 2049 for NFS, so NAS appliances that intentionally reject ICMP remain supported. After reboot, run `./verify-nas-service.sh`; it compares the mount from independent `su -mm` and plain `su` shells launched through adb instead of accepting only the service's own view. A pass establishes host-shell visibility only—it does not inspect Google Photos or any other app namespace.

@@ -3,7 +3,7 @@ RUMDL ?= .tools/bin/rumdl
 SHELLCHECK ?= .tools/bin/shellcheck
 SHELL_SCRIPTS := $(sort $(wildcard Pixel_Marlin_Sailfish_Android10_RW_NAS_Kernel_Scripts/*.sh tests/*.sh tools/*.sh))
 
-.PHONY: bootstrap-shfmt bootstrap-rumdl bootstrap-shellcheck format-shell check-shell-format check-shellcheck format-markdown check-markdown test-mount-probe test-remote-quote test-deploy-gates test-companion-manifest format check-format check
+.PHONY: bootstrap-shfmt bootstrap-rumdl bootstrap-shellcheck format-shell check-shell-format check-shellcheck format-markdown check-markdown test-mount-probe test-photo-scan test-remote-quote test-deploy-gates test-companion-manifest format check-format check
 
 bootstrap-shfmt:
 	tools/install-shfmt.sh "$(SHFMT)"
@@ -33,6 +33,10 @@ test-mount-probe: check-shell-format
 	bash tests/test-nas-mount-probe.sh
 	dash tests/test-nas-mount-probe.sh
 
+test-photo-scan: check-shell-format
+	bash tests/test-nas-photos-scan.sh
+	dash tests/test-nas-photos-scan.sh
+
 test-remote-quote: check-shell-format
 	bash tests/test-remote-quote.sh
 
@@ -46,4 +50,4 @@ format: format-shell format-markdown
 
 check-format: check-shell-format check-markdown
 
-check: check-format check-shellcheck test-mount-probe test-remote-quote test-deploy-gates test-companion-manifest
+check: check-format check-shellcheck test-mount-probe test-photo-scan test-remote-quote test-deploy-gates test-companion-manifest

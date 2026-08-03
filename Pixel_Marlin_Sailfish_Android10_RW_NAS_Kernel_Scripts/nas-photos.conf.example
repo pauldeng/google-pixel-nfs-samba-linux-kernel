@@ -1,0 +1,62 @@
+# Google Photos share: mounted read-only where Photos can see it.
+# Nothing is copied to internal flash.
+#
+# Copy to pixel-nas-operator-config/, edit, chmod 0600, then:
+#   ./install-nas-photos.sh ../pixel-nas-operator-config/nas-photos.conf \
+#       ../pixel-nas-operator-config/nas-smb.secret
+#
+# The password is NOT stored here. It lives in the secret file, which the
+# installer pipes straight into a root-owned 0600 file on the device.
+
+# Numeric IPv4 address. Names are rejected: the mount must not depend on DNS
+# during early boot.
+NAS_HOST=192.168.0.233
+
+# Share name only, with no slashes, commas, colons or spaces.
+SMB_SHARE=Multimedia
+
+# Optional subdirectory below the share. Mounting a directory rather than the
+# whole share narrows what the phone can see. No leading or trailing slash.
+SMB_PREFIX_PATH=Photo/Google-Photos-Pixel-Stage
+
+# Least-privilege, read-only account. The client is read-only as well, so the
+# authoritative archive cannot be modified from the phone.
+SMB_USER=pixel
+SMB_SECRET=/data/adb/nas-smb.secret
+
+# Folder name under DCIM, and the MediaStore bucket Google Photos will offer
+# under "Back up device folders". Letters, digits, dot, underscore, hyphen.
+PHOTO_FOLDER=NAS-Live
+
+# Bounded wait for the NAS at boot before the retry loop takes over.
+WAIT_SECONDS=60
+
+# Seconds between media-discovery scans. Reachability has a separate, shorter
+# cadence so an unavailable mount cannot block DCIM until the next scan.
+SCAN_INTERVAL_SECONDS=300
+
+# Seconds between reachability checks while idle. Long scans use this same
+# monotonic bound between checks.
+HEALTH_INTERVAL_SECONDS=15
+
+# Optional, shown with their defaults.
+#
+# Consecutive failed probes before the NAS is treated as gone. One failed probe
+# must never tear down a live mount.
+# UNREACHABLE_CONFIRMATIONS=3
+#
+# Pause between scan broadcasts. Every reboot prunes MediaStore rows for files
+# that were not mounted during its boot scan, so the whole folder is re-indexed
+# each boot and this sets how long that takes.
+# SCAN_PACE_SECONDS=1
+#
+# A new file must retain the same size and mtime across this window and until
+# its scan broadcast. Prefer a completed server-side copy followed by an atomic
+# rename into the watched tree; this is the fallback for accidental direct
+# copies.
+# FILE_STABILITY_SECONDS=30
+#
+# How many times a file is offered to MediaStore before it is treated as
+# unindexable and skipped. Sidecars and checksum files never index; without a
+# limit they would be rebroadcast every cycle forever.
+# REFUSAL_LIMIT=3
